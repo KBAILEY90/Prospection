@@ -4,9 +4,7 @@
 # In[35]:
 
 
-import geopandas as gpd
 import pandas as pd
-from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
