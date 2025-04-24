@@ -33,27 +33,12 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-def wait_until_clickable(locator, timeout=10):
-    try:
-        WebDriverWait(driver, timeout).until_not(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'img[src*="not-found.svg"]'))
-        )
-    except TimeoutException:
-        print("Blocking element did not disappear. Closing driver.")
-        driver.quit()
-        sys.exit("Terminated due to blocking overlay.")
-
-    return WebDriverWait(driver, timeout).until(
-        EC.element_to_be_clickable(locator)
-    )
-
-
 # In[18]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
 #pm.execute_notebook('1.Zoning.ipynb', '1.Zoning.output.ipynb')
-joined_df = pd.read_csv(zonage_path, encoding='ISO-8859-1')
+joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
 # In[20]:
@@ -136,7 +121,6 @@ for a in todo_addresses:
         visible_inputs = [el for el in inputs if el.is_displayed() and el.is_enabled()]
         search_input = visible_inputs[0]  
         search_input.clear()  # Ensure input is cleared  
-        wait_until_clickable((By.CSS_SELECTOR, 'input[placeholder="Adresse..."]'))
         search_input.click()
         search_input.send_keys(a)
         time.sleep(0.3)
