@@ -173,12 +173,14 @@ for a in todo_addresses:
             temp_df = temp_df.iloc[:-1]
             temp_df.to_csv(inaccessible_path, index=False, encoding='ISO-8859-1')  
             print("Hourly limit reached. Closing driver.")
-            pass
+            driver.quit()
+            break
 
         # Driver closed
         elif "invalid session id" in str(e) or "target window already closed" in str(e):
             print("Driver was closed manually. Terminating script.")
-            pass
+            driver.quit()
+            break
 
         # Address is not found
         else:
