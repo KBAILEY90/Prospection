@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[35]:
+# In[12]:
 
 
 import csv
@@ -19,9 +19,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 city = "SHERBROOKE"
+inaccessible_path = "data/Adresses Inaccessibles.csv"
+listed_path = "data/Liste Prospection.csv"
+zonage_path = "data/Zonage.csv"
 
 
-# In[36]:
+# In[13]:
 
 
 def get_cell(xpath):
@@ -30,15 +33,15 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-# In[39]:
+# In[14]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
 #pm.execute_notebook('1.Zoning.ipynb', '1.Zoning.output.ipynb')
-joined_df = pd.read_csv('Zonage.csv', encoding='utf-8-sig')
+joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
-# In[ ]:
+# In[15]:
 
 
 ############## PREPARE ##############
@@ -60,7 +63,6 @@ columns = [
 errorLogColumns = joined_df.columns
 
 # Load inaccessible addresses
-inaccessible_path = "Adresses Inaccessibles.csv"
 if os.path.exists(inaccessible_path):
     inaccessible_df = pd.read_csv(inaccessible_path, encoding='ISO-8859-1')
 else:
@@ -74,10 +76,15 @@ listed_addresses = pd.Series(dtype=str)
 inaccessible_addresses = pd.Series(dtype=str)
 
 # Load listed addresses
-listed_path = "Liste Prospection.csv"
 if os.path.exists(listed_path):
     listed_df = pd.read_csv(listed_path, encoding='ISO-8859-1')
     listed_addresses = listed_df["ADRESSE"]
+else:
+    with open(listed_path, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(columns)  # or errorLogColumns if different
+    listed_df = pd.read_csv(listed_path, encoding='ISO-8859-1')
+    listed_addresses = pd.Series(dtype=str)
 
 # Load inaccessible addresses
 if "ADRESSE" in inaccessible_df.columns:
@@ -95,7 +102,7 @@ options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--disable-gpu')
-driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 wait = WebDriverWait(driver, 5)
 
 # Go to the site
@@ -149,7 +156,7 @@ for a in todo_addresses:
         ]
 
     
-        with open("Liste Prospection.csv", 'a', newline='') as f:
+        with open(listed_path, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(fields)
 
@@ -163,9 +170,9 @@ for a in todo_addresses:
         if "element click intercepted" in str(e):
             print("Hourly limit reached. Closing driver.")
             # Remove last error from csv since this fail happens after two errors. It saves the first in the file, but shouldn't.
-            temp_df = pd.read_csv("Adresses Inaccessibles.csv")
+            temp_df = pd.read_csv(inaccessible_path)
             temp_df = temp_df.iloc[:-1]
-            temp_df.to_csv("Adresses Inaccessibles.csv", index=False)  
+            temp_df.to_csv(inaccessible_path, index=False)  
             driver.quit()
             sys.exit()
 
@@ -173,7 +180,8 @@ for a in todo_addresses:
             print(f"Failed to process address {a}: {str(e)}")
             # If not present in error log, add it. But if the error is because the screen closed, then don't
             if len(inaccessible_df[inaccessible_df['ADRESSE']==a]) == 0 and "invalid session id" not in str(e):
-                with open("Adresses Inaccessibles.csv", 'a', newline='') as f:
+                with open(i
+                          naccessible_path, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(row)
             continue  # Skip to next address if any error occurs
