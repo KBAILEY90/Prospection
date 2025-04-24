@@ -98,7 +98,7 @@ todo_addresses = joined_df[~joined_df["ADRESSE"].isin(excluded_addresses)]["ADRE
 
 ########### START SESSION ###########
 options = Options()
-#options.add_argument('--headless')
+options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--disable-gpu')
@@ -177,10 +177,10 @@ for a in todo_addresses:
 
         # Driver closed
         elif "invalid session id" in str(e) or "target window already closed" in str(e):
-            print("Driver was closed manully. Terminating script.")
+            print("Driver was closed manually. Terminating script.")
             pass
 
-        # Error but screen is not closed
+        # Address is not found
         else:
             print(f"Failed to process address {a}: {str(e)}")
             # If not present in error log, add it.
