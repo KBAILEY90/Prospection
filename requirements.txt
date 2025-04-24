@@ -1,0 +1,5 @@
+geopandas
+pandas
+selenium
+webdriver-manager
+papermill
