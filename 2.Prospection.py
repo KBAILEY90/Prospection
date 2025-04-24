@@ -180,8 +180,7 @@ for a in todo_addresses:
             print(f"Failed to process address {a}: {str(e)}")
             # If not present in error log, add it. But if the error is because the screen closed, then don't
             if len(inaccessible_df[inaccessible_df['ADRESSE']==a]) == 0 and "invalid session id" not in str(e):
-                with open(i
-                          naccessible_path, 'a', newline='') as f:
+                with open(inaccessible_path, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(row)
             continue  # Skip to next address if any error occurs
