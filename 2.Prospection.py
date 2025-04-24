@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[16]:
+# In[42]:
 
 
 import csv
@@ -24,7 +24,7 @@ listed_path = "data/Liste Prospection.csv"
 zonage_path = "data/Zonage.csv"
 
 
-# In[17]:
+# In[43]:
 
 
 def get_cell(xpath):
@@ -33,30 +33,15 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-def wait_until_clickable(locator, timeout=10):
-    try:
-        WebDriverWait(driver, timeout).until_not(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'img[src*="not-found.svg"]'))
-        )
-    except TimeoutException:
-        print("Blocking element did not disappear. Closing driver.")
-        driver.quit()
-        sys.exit("Terminated due to blocking overlay.")
-
-    return WebDriverWait(driver, timeout).until(
-        EC.element_to_be_clickable(locator)
-    )
-
-
-# In[18]:
+# In[44]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
 #pm.execute_notebook('1.Zoning.ipynb', '1.Zoning.output.ipynb')
-joined_df = pd.read_csv(zonage_path, encoding='ISO-8859-1')
+joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
-# In[20]:
+# In[45]:
 
 
 ############## PREPARE ##############
@@ -113,7 +98,7 @@ todo_addresses = joined_df[~joined_df["ADRESSE"].isin(excluded_addresses)]["ADRE
 
 ########### START SESSION ###########
 options = Options()
-options.add_argument('--headless')
+#options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--disable-gpu')
@@ -136,7 +121,6 @@ for a in todo_addresses:
         visible_inputs = [el for el in inputs if el.is_displayed() and el.is_enabled()]
         search_input = visible_inputs[0]  
         search_input.clear()  # Ensure input is cleared  
-        wait_until_clickable((By.CSS_SELECTOR, 'input[placeholder="Adresse..."]'))
         search_input.click()
         search_input.send_keys(a)
         time.sleep(0.3)
@@ -184,18 +168,23 @@ for a in todo_addresses:
     except Exception as e:
         # Hourly limit pop-up appeared
         if "element click intercepted" in str(e):
-            print("Hourly limit reached. Closing driver.")
             # Remove last error from csv since this fail happens after two errors. It saves the first in the file, but shouldn't.
             temp_df = pd.read_csv(inaccessible_path)
             temp_df = temp_df.iloc[:-1]
-            temp_df.to_csv(inaccessible_path, index=False)  
-            driver.quit()
-            sys.exit()
+            temp_df.to_csv(inaccessible_path, index=False, encoding='ISO-8859-1')  
+            print("Hourly limit reached. Closing driver.")
+            pass
 
+        # Driver closed
+        elif "invalid session id" in str(e) or "target window already closed" in str(e):
+            print("Driver was closed manully. Terminating script.")
+            pass
+
+        # Error but screen is not closed
         else:
             print(f"Failed to process address {a}: {str(e)}")
-            # If not present in error log, add it. But if the error is because the screen closed, then don't
-            if len(inaccessible_df[inaccessible_df['ADRESSE']==a]) == 0 and "invalid session id" not in str(e):
+            # If not present in error log, add it.
+            if len(inaccessible_df[inaccessible_df['ADRESSE']==a]) == 0:
                 with open(inaccessible_path, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(row)
@@ -204,10 +193,4 @@ for a in todo_addresses:
 
 
 driver.quit()
-
-
-# In[ ]:
-
-
-
 
