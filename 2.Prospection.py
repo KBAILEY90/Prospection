@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[42]:
+# In[1]:
 
 
 import csv
@@ -25,7 +25,7 @@ listed_path = "data/Liste Prospection.csv"
 zonage_path = "data/Zonage.csv"
 
 
-# In[43]:
+# In[2]:
 
 
 # Create screenshot directory if needed
@@ -37,7 +37,7 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-# In[44]:
+# In[3]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
@@ -45,7 +45,7 @@ def get_cell(xpath):
 joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
-# In[45]:
+# In[5]:
 
 
 columns = [
@@ -84,7 +84,7 @@ excluded_addresses = pd.concat([listed_addresses, inaccessible_addresses]).dropn
 todo_addresses = joined_df[~joined_df["ADRESSE"].isin(excluded_addresses)]["ADRESSE"]
 
 options = Options()
-options.add_argument('--headless')
+#options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--disable-gpu')
@@ -111,7 +111,6 @@ for a in todo_addresses:
         visible_inputs = [el for el in inputs if el.is_displayed() and el.is_enabled()]
         search_input = visible_inputs[0]
         driver.execute_script("arguments[0].scrollIntoView(true);", search_input)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')))
         search_input.clear()
         search_input.click()
         search_input.send_keys(a)
@@ -176,4 +175,10 @@ for a in todo_addresses:
 
 driver.quit()
 commit_changes()
+
+
+# In[6]:
+
+
+str(e)
 
