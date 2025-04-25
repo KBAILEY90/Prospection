@@ -20,8 +20,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 city = "SHERBROOKE"
-inaccessible_path = "data/Adresses Inaccessibles.csv"
-listed_path = "data/Liste Prospection.csv"
+inaccessible_path = "data/Adresses_Inaccessibles.csv"
+listed_path = "data/Liste_Prospection.csv"
 zonage_path = "data/Zonage.csv"
 
 
