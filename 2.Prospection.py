@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[ ]:
 
 
 import csv
@@ -25,7 +25,7 @@ listed_path = "data/Liste Prospection.csv"
 zonage_path = "data/Zonage.csv"
 
 
-# In[2]:
+# In[ ]:
 
 
 # Create screenshot directory if needed
@@ -37,7 +37,7 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-# In[3]:
+# In[ ]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
@@ -45,7 +45,7 @@ def get_cell(xpath):
 joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
-# In[5]:
+# In[ ]:
 
 
 columns = [
@@ -175,10 +175,4 @@ for a in todo_addresses:
 
 driver.quit()
 commit_changes()
-
-
-# In[6]:
-
-
-str(e)
 
