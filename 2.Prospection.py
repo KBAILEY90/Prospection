@@ -10,6 +10,7 @@ import sys
 import time
 import pandas as pd
 import papermill as pm
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -92,6 +93,15 @@ wait = WebDriverWait(driver, 5)
 
 driver.get("https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche")
 
+start_time = time.time()
+
+def commit_changes():
+    os.system("git config user.name \"github-actions[bot]\"")
+    os.system("git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"")
+    os.system(f"git add {listed_path} {inaccessible_path}")
+    os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
+    os.system("git push")
+
 for a in todo_addresses:
     time.sleep(1)
     row = joined_df.loc[joined_df['ADRESSE'] == a].iloc[0]
@@ -159,5 +169,11 @@ for a in todo_addresses:
                     print(f"Failed to log inaccessible address: {log_err}")
             continue
 
+    # Commit every 5 minutes
+    if time.time() - start_time > 300:
+        commit_changes()
+        start_time = time.time()
+
 driver.quit()
+commit_changes()
 
