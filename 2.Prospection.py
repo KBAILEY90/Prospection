@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# In[1]:
 
 
 import csv
@@ -17,6 +17,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+import tempfile
 from webdriver_manager.chrome import ChromeDriverManager
 
 city = "SHERBROOKE"
@@ -25,7 +26,7 @@ listed_path = "data/Liste_Prospection.csv"
 zonage_path = "data/Zonage.csv"
 
 
-# In[ ]:
+# In[2]:
 
 
 # Create screenshot directory if needed
@@ -37,7 +38,7 @@ def get_cell(xpath):
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-# In[ ]:
+# In[3]:
 
 
 # Uncomment if 1.Zonage needs to be refreshed
@@ -45,7 +46,7 @@ def get_cell(xpath):
 joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
 
 
-# In[ ]:
+# In[4]:
 
 
 columns = [
@@ -88,6 +89,8 @@ options = Options()
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--disable-gpu')
+user_data_dir = tempfile.mkdtemp()
+options.add_argument(f'--user-data-dir={user_data_dir}')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 wait = WebDriverWait(driver, 5)
 
@@ -175,4 +178,10 @@ for a in todo_addresses:
 
 driver.quit()
 commit_changes()
+
+
+# In[ ]:
+
+
+
 
