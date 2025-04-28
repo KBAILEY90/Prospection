@@ -127,7 +127,7 @@ for a in todo_addresses:
         url = driver.current_url
 
         fields = [
-            a, row['RUE'], units, constructionDate, row['NO_ZONE'], row['GRILLEUSAGE'], row['ARRONDISSEMENT']
+            a, row['RUE'], units, constructionDate, row['NO_ZONE'], row['GRILLEUSAGE'], row['ARRONDISSEMENT'],
             ownerName, ownerAddress, inscriptionDate, url, row['GOOGLE_MAPS']
         ]
 
