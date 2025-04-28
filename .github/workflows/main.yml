@@ -2,7 +2,7 @@ name: Run Prospection Script
 
 on:
   schedule:
-    - cron: '0 */1 * * *'  # Every 2 hours
+    - cron: '0 */1 * * *'  # Every hour
   workflow_dispatch:
 
 jobs:
