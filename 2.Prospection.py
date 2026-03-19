@@ -1,185 +1,277 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
+"""
+2.Prospection.py â Optimised parallel scraper
+==============================================
+Improvements over original:
+  â¢ BUG FIX #1  XPath apostrophe: uses contains() to match "inscription au r"
+                so U+2019 vs U+0027 never causes a mismatch again.
+  â¢ BUG FIX #2  optional_cell() for building fields (vacant lots lack them).
+  â¢ BUG FIX #3  Column-name guard: handles both GOOGLE_MAPS and GMAPS_URL.
+  â¢ PERF       N_WORKERS parallel Chrome instances share a work queue.
+  â¢ PERF       Removed fixed 1 s sleep between addresses (wait.until is enough).
+  â¢ PERF       Skip new_search navigation â property page has the same input bar.
+  â¢ PERF       Thread-safe CSV writes with in-memory duplicate guard.
+"""
 
 import csv
 import os
-import sys
 import time
+import threading
+from queue import Queue, Empty
+import concurrent.futures
+
 import pandas as pd
-import papermill as pm
-from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-import tempfile
 from webdriver_manager.chrome import ChromeDriverManager
 
-city = "SHERBROOKE"
+# ââ Configuration âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
+TIMEOUT        = 5       # seconds â required page elements
+OPT_TIMEOUT    = 2       # seconds â optional fields (may be absent on vacant lots)
+COMMIT_EVERY   = 300     # seconds between git auto-commits
+
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
-listed_path = "data/Liste_Prospection.csv"
-zonage_path = "data/Zonage.csv"
+listed_path       = "data/Liste_Prospection.csv"
+zonage_path       = "data/Zonage.csv"
 
+# ââ Load source data ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+joined_df = pd.read_csv(zonage_path, encoding="utf-8-sig")
+gmaps_col = "GOOGLE_MAPS" if "GOOGLE_MAPS" in joined_df.columns else "GMAPS_URL"
 
-# In[2]:
+COLUMNS = [
+    "ADRESSE", "RUE", "NB_LOGEMENTS", "DATE_CONSTRUCTION",
+    "NO_ZONE", "GRILLEUSAGE", "ARRONDISSEMENT",
+    "NOM_PROPRIETAIRE", "ADRESSE_PROPRIETAIRE", "DATE_INSCRIPTION",
+    "URL", "GOOGLE_MAPS",
+]
+ERROR_COLS = list(joined_df.columns)
 
-
-# Create screenshot directory if needed
 os.makedirs("errors", exist_ok=True)
 
-def get_cell(xpath):
+# Initialise output CSVs if missing
+for path, header in [(listed_path, COLUMNS), (inaccessible_path, ERROR_COLS)]:
+    if not os.path.exists(path):
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerow(header)
+
+# Build todo list (skip already done)
+listed_df       = pd.read_csv(listed_path,       encoding="utf-8-sig")
+inaccessible_df = pd.read_csv(inaccessible_path, encoding="utf-8-sig")
+
+done = set(
+    pd.concat([
+        listed_df.get("ADRESSE",       pd.Series(dtype=str)),
+        inaccessible_df.get("ADRESSE", pd.Series(dtype=str)),
+    ]).dropna()
+)
+
+todo = [a for a in joined_df["ADRESSE"].tolist() if a not in done]
+total = len(todo)
+print(f"Total addresses : {len(joined_df)}")
+print(f"Already done    : {len(done)}")
+print(f"Remaining       : {total}")
+
+if not todo:
+    print("Nothing left to process. Exiting.")
+    raise SystemExit(0)
+
+# ââ Shared state ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+address_queue = Queue()
+for a in todo:
+    address_queue.put(a)
+
+write_lock  = threading.Lock()   # guards listed_path writes
+inacc_lock  = threading.Lock()   # guards inaccessible_path writes + inacc_seen
+stats_lock  = threading.Lock()   # guards stats dict
+
+inacc_seen  = set(inaccessible_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
+stats       = {"ok": 0, "fail": 0}
+_t0         = time.time()   # set again just before workers start, but needs to exist here
+
+# ââ Helpers âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+def make_driver() -> webdriver.Chrome:
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1280,900")
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=opts
+    )
+
+
+def get_cell(wait: WebDriverWait, driver, xpath: str) -> str:
+    """Required field â raises TimeoutException if not found."""
     el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
     driver.execute_script("arguments[0].scrollIntoView(true);", el)
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
-# In[3]:
+def optional_cell(driver, xpath: str) -> str:
+    """Optional field â returns '' if absent (e.g. vacant lots)."""
+    try:
+        w  = WebDriverWait(driver, OPT_TIMEOUT)
+        el = w.until(EC.presence_of_element_located((By.XPATH, xpath)))
+        driver.execute_script("arguments[0].scrollIntoView(true);", el)
+        return w.until(EC.visibility_of(el)).text.strip()
+    except Exception:
+        return ""
 
 
-# Uncomment if 1.Zonage needs to be refreshed
-#pm.execute_notebook('1.Zoning.ipynb', '1.Zoning.output.ipynb')
-joined_df = pd.read_csv(zonage_path, encoding='utf-8-sig')
+def safe_write_listed(fields: list) -> None:
+    with write_lock:
+        with open(listed_path, "a", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerow(fields)
 
 
-# In[4]:
+def safe_write_inaccessible(row) -> None:
+    with inacc_lock:
+        if row["ADRESSE"] not in inacc_seen:
+            inacc_seen.add(row["ADRESSE"])
+            with open(inaccessible_path, "a", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(list(row))
 
 
-columns = [
-    "ADRESSE", "RUE", "NB_LOGEMENTS", "DATE_CONSTRUCTION", "NO_ZONE", "GRILLEUSAGE",
-    "ARRONDISSEMENT", "NOM_PROPRIETAIRE", "ADRESSE_PROPRIETAIRE", "DATE_INSCRIPTION",
-    "URL", "GOOGLE_MAPS"
-]
-
-errorLogColumns = joined_df.columns
-
-if os.path.exists(inaccessible_path):
-    inaccessible_df = pd.read_csv(inaccessible_path, encoding='utf-8-sig')
-else:
-    with open(inaccessible_path, 'a', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow(errorLogColumns)
-    inaccessible_df = pd.read_csv(inaccessible_path, encoding='utf-8-sig')
-
-listed_addresses = pd.Series(dtype=str)
-inaccessible_addresses = pd.Series(dtype=str)
-
-if os.path.exists(listed_path):
-    listed_df = pd.read_csv(listed_path, encoding='utf-8-sig')
-    listed_addresses = listed_df["ADRESSE"]
-else:
-    with open(listed_path, 'a', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow(columns)
-    listed_df = pd.read_csv(listed_path, encoding='utf-8-sig')
-    listed_addresses = pd.Series(dtype=str)
-
-if "ADRESSE" in inaccessible_df.columns:
-    inaccessible_addresses = inaccessible_df["ADRESSE"]
-
-excluded_addresses = pd.concat([listed_addresses, inaccessible_addresses]).dropna().unique()
-todo_addresses = joined_df[~joined_df["ADRESSE"].isin(excluded_addresses)]["ADRESSE"]
-
-options = Options()
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-options.add_argument('--disable-gpu')
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-wait = WebDriverWait(driver, 5)
-
-driver.get("https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche")
-
-start_time = time.time()
-
-def commit_changes():
-    os.system("git config user.name \"github-actions[bot]\"")
-    os.system("git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"")
-    os.system(f"git add {listed_path} {inaccessible_path}")
+def commit_changes() -> None:
+    os.system('git config user.name  "github-actions[bot]"')
+    os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
+    os.system(f'git add "{listed_path}" "{inaccessible_path}"')
     os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
     os.system("git push")
 
-for a in todo_addresses:
-    time.sleep(1)
-    row = joined_df.loc[joined_df['ADRESSE'] == a].iloc[0]
 
-    try:
-        inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')))
-        visible_inputs = [el for el in inputs if el.is_displayed() and el.is_enabled()]
-        search_input = visible_inputs[0]
-        driver.execute_script("arguments[0].scrollIntoView(true);", search_input)
-        search_input.clear()
-        search_input.click()
-        search_input.send_keys(a)
-        time.sleep(0.3)
+# ââ Worker ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+def worker(worker_id: int) -> None:
+    driver = make_driver()
+    wait   = WebDriverWait(driver, TIMEOUT)
+    driver.get("https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche")
+    last_commit = time.time()
+    print(f"[W{worker_id}] Ready", flush=True)
 
-        suggestion = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'mat-option.mat-mdc-option')))
-        suggestion.click()
+    while True:
+        try:
+            a = address_queue.get_nowait()
+        except Empty:
+            break
 
-        ownerName = get_cell('//tr[td[text()="Nom:"]]/td[2]')
-        ownerAddress = get_cell('//tr[td[text()="Adresse Postale:"]]/td[2]')
-        inscriptionDate = get_cell('//tr[td[text()="Date d’inscription au rôle:"]]/td[2]')
-        constructionDate = get_cell('//tr[td[text()="Année de construction:"]]/td[2]')
-        units = get_cell('//tr[td[text()="Nombre de logements:"]]/td[2]')
-        url = driver.current_url
+        row = joined_df.loc[joined_df["ADRESSE"] == a].iloc[0]
 
-        fields = [
-            a, row['RUE'], units, constructionDate, row['NO_ZONE'], row['GRILLEUSAGE'], row['ARRONDISSEMENT'],
-            ownerName, ownerAddress, inscriptionDate, url, row['GOOGLE_MAPS']
-        ]
+        try:
+            # ââ Search ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # Works from both the search page and the property page
+            inputs = wait.until(EC.presence_of_all_elements_located(
+                (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
+            ))
+            inp = next(el for el in inputs if el.is_displayed() and el.is_enabled())
+            driver.execute_script("arguments[0].scrollIntoView(true);", inp)
+            inp.clear()
+            inp.click()
+            inp.send_keys(a)
 
-        with open(listed_path, 'a', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            writer.writerow(fields)
+            # Wait for autocomplete â no fixed sleep needed
+            suggestion = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
+            ))
+            suggestion.click()
 
-        new_search = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'ion-icon.icon-search')))
-        new_search.click()
+            # ââ Extract data âââââââââââââââââââââââââââââââââââââââââââââââââ
+            ownerName    = get_cell(wait, driver, '//tr[td[text()="Nom:"]]/td[2]')
+            ownerAddress = get_cell(wait, driver, '//tr[td[text()="Adresse Postale:"]]/td[2]')
 
-    except Exception as e:
-        driver.save_screenshot(f"errors/{a.replace(' ', '_')}.png")
+            # FIX: contains() avoids U+2019 (curled ') vs U+0027 (straight ') mismatch
+            inscriptionDate  = get_cell(wait, driver,
+                                        '//tr[td[contains(text(),"inscription au r")]]/td[2]')
+            # Optional â vacant lots won't have these rows
+            constructionDate = optional_cell(driver, '//tr[td[text()="AnnÃ©e de construction:"]]/td[2]')
+            units            = optional_cell(driver, '//tr[td[text()="Nombre de logements:"]]/td[2]')
 
-        if "element click intercepted" in str(e):
+            url   = driver.current_url
+            gmaps = row.get(gmaps_col, "")
+
+            safe_write_listed([
+                a, row["RUE"], units, constructionDate,
+                row["NO_ZONE"], row["GRILLEUSAGE"], row["ARRONDISSEMENT"],
+                ownerName, ownerAddress, inscriptionDate, url, gmaps,
+            ])
+
+            with stats_lock:
+                stats["ok"] += 1
+                done_n = stats["ok"] + stats["fail"]
+                remaining = address_queue.qsize()
+                rate = done_n / max(time.time() - _t0, 1)
+                eta_min = remaining / rate / 60 if rate > 0 else 0
+                print(
+                    f"[W{worker_id}] â {a:<35} "
+                    f"({done_n}/{total})  ~{remaining} left  "
+                    f"ETA {eta_min:.0f} min",
+                    flush=True,
+                )
+
+        except Exception as e:
+            err = str(e)
+            safe_name = a.replace(" ", "_")[:40]
+            driver.save_screenshot(f"errors/w{worker_id}_{safe_name}.png")
+
+            if "element click intercepted" in err:
+                print(f"[W{worker_id}] â  Rate limit â pausing 60 s, re-queuing {a}", flush=True)
+                time.sleep(60)
+                address_queue.put(a)   # re-queue for retry
+                continue
+
+            elif "invalid session id" in err or "target window already closed" in err:
+                print(f"[W{worker_id}] â Session lost â stopping worker", flush=True)
+                break
+
+            else:
+                with stats_lock:
+                    stats["fail"] += 1
+                    done_n = stats["ok"] + stats["fail"]
+                    print(
+                        f"[W{worker_id}] â {a}: {err[:100]}  ({done_n}/{total})",
+                        flush=True,
+                    )
+                safe_write_inaccessible(row)
+                continue
+
+        # Periodic git commit (only one worker needs to do it â first to hit the interval)
+        if time.time() - last_commit > COMMIT_EVERY:
+            commit_changes()
+            last_commit = time.time()
+
+    driver.quit()
+    print(f"[W{worker_id}] Finished", flush=True)
+
+
+# ââ Main ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+if __name__ == "__main__":
+    global _t0
+    _t0 = time.time()
+    print(f"Launching {N_WORKERS} parallel worker(s)â¦", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
+        futures = {pool.submit(worker, i + 1): i for i in range(N_WORKERS)}
+        for f in concurrent.futures.as_completed(futures):
             try:
-                temp_df = pd.read_csv(inaccessible_path, encoding='utf-8-sig')
-                temp_df = temp_df.iloc[:-1]
-                temp_df.to_csv(inaccessible_path, index=False, encoding='utf-8-sig')
-            except Exception as csv_err:
-                print(f"CSV trimming failed: {csv_err}")
-            print("Hourly limit reached. Closing driver.")
-            driver.quit()
-            break
+                f.result()
+            except Exception as exc:
+                print(f"Worker {futures[f] + 1} raised: {exc}", flush=True)
 
-        elif "invalid session id" in str(e) or "target window already closed" in str(e):
-            print("Driver was closed manually. Terminating script.")
-            driver.quit()
-            break
+    elapsed  = time.time() - _t0
+    ok, fail = stats["ok"], stats["fail"]
+    done_n   = ok + fail
+    rate     = done_n / elapsed if elapsed > 0 else 0
 
-        else:
-            print(f"Failed to process address {a}: {str(e)}")
-            if len(inaccessible_df[inaccessible_df['ADRESSE'] == a]) == 0:
-                try:
-                    with open(inaccessible_path, 'a', newline='', encoding='utf-8-sig') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(row)
-                except Exception as log_err:
-                    print(f"Failed to log inaccessible address: {log_err}")
-            continue
+    print(f"\n{'=' * 56}")
+    print(f"Finished in {elapsed:.0f} s  |  â {ok}  â {fail}  |  {rate:.2f} addr/s")
+    print(f"{'=' * 56}", flush=True)
 
-    # Commit every 5 minutes
-    if time.time() - start_time > 300:
-        commit_changes()
-        start_time = time.time()
-
-driver.quit()
-commit_changes()
-
-
-# In[ ]:
-
-
-
-
+    commit_changes()
+    print("All done.", flush=True)
