@@ -11,7 +11,7 @@ Improvements over original:
   â¢ BUG FIX #3  Column-name guard: handles both GOOGLE_MAPS and GMAPS_URL.
   â¢ PERF       N_WORKERS parallel Chrome instances share a work queue.
   â¢ PERF       Removed fixed 1 s sleep between addresses (wait.until is enough).
-  â¢ PERF       Skip new_search navigation â property page has the same input bar.
+  â¢ FIX        Navigate to search page per address (clean Angular state).
   â¢ PERF       Thread-safe CSV writes with in-memory duplicate guard.
 """
 
@@ -32,16 +32,20 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ââ Configuration âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
 TIMEOUT        = 5       # seconds â required page elements
 OPT_TIMEOUT    = 2       # seconds â optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
+
+SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
 listed_path       = "data/Liste_Prospection.csv"
 zonage_path       = "data/Zonage.csv"
 
 # ââ Load source data ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 joined_df = pd.read_csv(zonage_path, encoding="utf-8-sig")
 gmaps_col = "GOOGLE_MAPS" if "GOOGLE_MAPS" in joined_df.columns else "GMAPS_URL"
 
@@ -83,6 +87,7 @@ if not todo:
     raise SystemExit(0)
 
 # ââ Shared state ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 address_queue = Queue()
 for a in todo:
     address_queue.put(a)
@@ -93,9 +98,10 @@ stats_lock  = threading.Lock()   # guards stats dict
 
 inacc_seen  = set(inaccessible_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
 stats       = {"ok": 0, "fail": 0}
-_t0         = time.time()   # set again just before workers start, but needs to exist here
+_t0         = time.time()
 
 # ââ Helpers âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 def make_driver() -> webdriver.Chrome:
     opts = Options()
     opts.add_argument("--headless")
@@ -110,7 +116,7 @@ def make_driver() -> webdriver.Chrome:
 
 def get_cell(wait: WebDriverWait, driver, xpath: str) -> str:
     """Required field â raises TimeoutException if not found."""
-    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    el = wait.until(EC.presence_of_element_located((By.XPATH xpath)))
     driver.execute_script("arguments[0].scrollIntoView(true);", el)
     return wait.until(EC.visibility_of(el)).text.strip()
 
@@ -145,14 +151,14 @@ def commit_changes() -> None:
     os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
     os.system(f'git add "{listed_path}" "{inaccessible_path}"')
     os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
-    os.system("git push")
+    os.system("git pull --rebase && git push || git push")
 
 
 # ââ Worker ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 def worker(worker_id: int) -> None:
     driver = make_driver()
     wait   = WebDriverWait(driver, TIMEOUT)
-    driver.get("https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche")
     last_commit = time.time()
     print(f"[W{worker_id}] Ready", flush=True)
 
@@ -165,24 +171,23 @@ def worker(worker_id: int) -> None:
         row = joined_df.loc[joined_df["ADRESSE"] == a].iloc[0]
 
         try:
-            # ââ Search ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-            # Works from both the search page and the property page
-            inputs = wait.until(EC.presence_of_all_elements_located(
+            # ââ Navigate to search page for clean Angular state each time ââââ
+            driver.get(SEARCH_URL)
+
+            # ââ Search ââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            inp = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
             ))
-            inp = next(el for el in inputs if el.is_displayed() and el.is_enabled())
-            driver.execute_script("arguments[0].scrollIntoView(true);", inp)
-            inp.clear()
             inp.click()
             inp.send_keys(a)
 
-            # Wait for autocomplete â no fixed sleep needed
+            # Wait for autocomplete
             suggestion = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
             ))
             suggestion.click()
 
-            # ââ Extract data âââââââââââââââââââââââââââââââââââââââââââââââââ
+            # ââ Extract data ââââââââââââââââââââââââââââââââââââââââââââââââââ
             ownerName    = get_cell(wait, driver, '//tr[td[text()="Nom:"]]/td[2]')
             ownerAddress = get_cell(wait, driver, '//tr[td[text()="Adresse Postale:"]]/td[2]')
 
@@ -221,7 +226,7 @@ def worker(worker_id: int) -> None:
             driver.save_screenshot(f"errors/w{worker_id}_{safe_name}.png")
 
             if "element click intercepted" in err:
-                print(f"[W{worker_id}] â  Rate limit â pausing 60 s, re-queuing {a}", flush=True)
+                print(f"[W{worker_id}] â  Rate limit â pausing 60 s, re-queuing {a}", flush=True)
                 time.sleep(60)
                 address_queue.put(a)   # re-queue for retry
                 continue
@@ -241,7 +246,7 @@ def worker(worker_id: int) -> None:
                 safe_write_inaccessible(row)
                 continue
 
-        # Periodic git commit (only one worker needs to do it â first to hit the interval)
+        # Periodic git commit
         if time.time() - last_commit > COMMIT_EVERY:
             commit_changes()
             last_commit = time.time()
@@ -251,6 +256,7 @@ def worker(worker_id: int) -> None:
 
 
 # ââ Main ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
 if __name__ == "__main__":
     _t0 = time.time()
     print(f"Launching {N_WORKERS} parallel worker(s)â¦", flush=True)
