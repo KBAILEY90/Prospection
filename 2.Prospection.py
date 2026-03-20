@@ -2,17 +2,17 @@
 # coding: utf-8
 
 """
-2.Prospection.py â Optimised parallel scraper
+2.Prospection.py - Optimised parallel scraper
 ==============================================
 Improvements over original:
-  â¢ BUG FIX #1  XPath apostrophe: uses contains() to match "inscription au r"
+  * BUG FIX #1  XPath apostrophe: uses contains() to match "inscription au r"
                 so U+2019 vs U+0027 never causes a mismatch again.
-  â¢ BUG FIX #2  optional_cell() for building fields (vacant lots lack them).
-  â¢ BUG FIX #3  Column-name guard: handles both GOOGLE_MAPS and GMAPS_URL.
-  â¢ PERF       N_WORKERS parallel Chrome instances share a work queue.
-  â¢ PERF       Removed fixed 1 s sleep between addresses (wait.until is enough).
-  â¢ FIX        Navigate to search page per address (clean Angular state).
-  â¢ PERF       Thread-safe CSV writes with in-memory duplicate guard.
+  * BUG FIX #2  optional_cell() for building fields (vacant lots lack them).
+  * BUG FIX #3  Column-name guard: handles both GOOGLE_MAPS and GMAPS_URL.
+  * PERF       N_WORKERS parallel Chrome instances share a work queue.
+  * PERF       Removed fixed 1 s sleep between addresses (wait.until is enough).
+  * FIX        Navigate to search page per address (clean Angular state).
+  * PERF       Thread-safe CSV writes with in-memory duplicate guard.
 """
 
 import csv
@@ -31,21 +31,18 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ââ Configuration âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Configuration -------------------------------------------------------------
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
-TIMEOUT        = 5       # seconds â required page elements
-OPT_TIMEOUT    = 2       # seconds â optional fields (may be absent on vacant lots)
+TIMEOUT        = 5       # seconds -- required page elements
+OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
-
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
 listed_path       = "data/Liste_Prospection.csv"
 zonage_path       = "data/Zonage.csv"
 
-# ââ Load source data ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Load source data ----------------------------------------------------------
 joined_df = pd.read_csv(zonage_path, encoding="utf-8-sig")
 gmaps_col = "GOOGLE_MAPS" if "GOOGLE_MAPS" in joined_df.columns else "GMAPS_URL"
 
@@ -86,8 +83,7 @@ if not todo:
     print("Nothing left to process. Exiting.")
     raise SystemExit(0)
 
-# ââ Shared state ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Shared state --------------------------------------------------------------
 address_queue = Queue()
 for a in todo:
     address_queue.put(a)
@@ -100,8 +96,7 @@ inacc_seen  = set(inaccessible_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
 stats       = {"ok": 0, "fail": 0}
 _t0         = time.time()
 
-# ââ Helpers âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Helpers -------------------------------------------------------------------
 def make_driver() -> webdriver.Chrome:
     opts = Options()
     opts.add_argument("--headless")
@@ -115,14 +110,14 @@ def make_driver() -> webdriver.Chrome:
 
 
 def get_cell(wait: WebDriverWait, driver, xpath: str) -> str:
-    """Required field â raises TimeoutException if not found."""
-    el = wait.until(EC.presence_of_element_located((By.XPATH xpath)))
+    """Required field -- raises TimeoutException if not found."""
+    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
     driver.execute_script("arguments[0].scrollIntoView(true);", el)
     return wait.until(EC.visibility_of(el)).text.strip()
 
 
 def optional_cell(driver, xpath: str) -> str:
-    """Optional field â returns '' if absent (e.g. vacant lots)."""
+    """Optional field -- returns '' if absent (e.g. vacant lots)."""
     try:
         w  = WebDriverWait(driver, OPT_TIMEOUT)
         el = w.until(EC.presence_of_element_located((By.XPATH, xpath)))
@@ -154,8 +149,7 @@ def commit_changes() -> None:
     os.system("git pull --rebase && git push || git push")
 
 
-# ââ Worker ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Worker --------------------------------------------------------------------
 def worker(worker_id: int) -> None:
     driver = make_driver()
     wait   = WebDriverWait(driver, TIMEOUT)
@@ -171,10 +165,10 @@ def worker(worker_id: int) -> None:
         row = joined_df.loc[joined_df["ADRESSE"] == a].iloc[0]
 
         try:
-            # ââ Navigate to search page for clean Angular state each time ââââ
+            # -- Navigate to search page for clean Angular state each time ----
             driver.get(SEARCH_URL)
 
-            # ââ Search ââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # -- Search -------------------------------------------------------
             inp = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
             ))
@@ -187,15 +181,15 @@ def worker(worker_id: int) -> None:
             ))
             suggestion.click()
 
-            # ââ Extract data ââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # -- Extract data -------------------------------------------------
             ownerName    = get_cell(wait, driver, '//tr[td[text()="Nom:"]]/td[2]')
             ownerAddress = get_cell(wait, driver, '//tr[td[text()="Adresse Postale:"]]/td[2]')
 
             # FIX: contains() avoids U+2019 (curled ') vs U+0027 (straight ') mismatch
             inscriptionDate  = get_cell(wait, driver,
                                         '//tr[td[contains(text(),"inscription au r")]]/td[2]')
-            # Optional â vacant lots won't have these rows
-            constructionDate = optional_cell(driver, '//tr[td[text()="AnnÃ©e de construction:"]]/td[2]')
+            # Optional -- vacant lots won't have these rows
+            constructionDate = optional_cell(driver, '//tr[td[text()="Ann\u00e9e de construction:"]]/td[2]')
             units            = optional_cell(driver, '//tr[td[text()="Nombre de logements:"]]/td[2]')
 
             url   = driver.current_url
@@ -214,7 +208,7 @@ def worker(worker_id: int) -> None:
                 rate = done_n / max(time.time() - _t0, 1)
                 eta_min = remaining / rate / 60 if rate > 0 else 0
                 print(
-                    f"[W{worker_id}] â {a:<35} "
+                    f"[W{worker_id}] OK {a:<35} "
                     f"({done_n}/{total})  ~{remaining} left  "
                     f"ETA {eta_min:.0f} min",
                     flush=True,
@@ -226,13 +220,13 @@ def worker(worker_id: int) -> None:
             driver.save_screenshot(f"errors/w{worker_id}_{safe_name}.png")
 
             if "element click intercepted" in err:
-                print(f"[W{worker_id}] â  Rate limit â pausing 60 s, re-queuing {a}", flush=True)
+                print(f"[W{worker_id}] WARN Rate limit -- pausing 60 s, re-queuing {a}", flush=True)
                 time.sleep(60)
                 address_queue.put(a)   # re-queue for retry
                 continue
 
             elif "invalid session id" in err or "target window already closed" in err:
-                print(f"[W{worker_id}] â Session lost â stopping worker", flush=True)
+                print(f"[W{worker_id}] FAIL Session lost -- stopping worker", flush=True)
                 break
 
             else:
@@ -240,13 +234,13 @@ def worker(worker_id: int) -> None:
                     stats["fail"] += 1
                     done_n = stats["ok"] + stats["fail"]
                     print(
-                        f"[W{worker_id}] â {a}: {err[:100]}  ({done_n}/{total})",
+                        f"[W{worker_id}] FAIL {a}: {err[:100]}  ({done_n}/{total})",
                         flush=True,
                     )
                 safe_write_inaccessible(row)
                 continue
 
-        # Periodic git commit
+        # Periodic git commit (only one worker needs to do it -- first to hit the interval)
         if time.time() - last_commit > COMMIT_EVERY:
             commit_changes()
             last_commit = time.time()
@@ -255,11 +249,10 @@ def worker(worker_id: int) -> None:
     print(f"[W{worker_id}] Finished", flush=True)
 
 
-# ââ Main ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# -- Main ----------------------------------------------------------------------
 if __name__ == "__main__":
     _t0 = time.time()
-    print(f"Launching {N_WORKERS} parallel worker(s)â¦", flush=True)
+    print(f"Launching {N_WORKERS} parallel worker(s)...", flush=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
         futures = {pool.submit(worker, i + 1): i for i in range(N_WORKERS)}
@@ -275,7 +268,7 @@ if __name__ == "__main__":
     rate     = done_n / elapsed if elapsed > 0 else 0
 
     print(f"\n{'=' * 56}")
-    print(f"Finished in {elapsed:.0f} s  |  â {ok}  â {fail}  |  {rate:.2f} addr/s")
+    print(f"Finished in {elapsed:.0f} s  |  OK {ok}  FAIL {fail}  |  {rate:.2f} addr/s")
     print(f"{'=' * 56}", flush=True)
 
     commit_changes()
