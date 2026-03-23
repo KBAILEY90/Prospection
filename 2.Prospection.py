@@ -355,7 +355,7 @@ def worker(worker_id: int) -> None:
                 # Brief pause before retry
                 time.sleep(1)
 
-             except Exception as e:
+            except Exception as e:
                 err = str(e)
                 ctx = get_error_context(driver)
                 safe_name = a.replace(" ", "_")[:40]
