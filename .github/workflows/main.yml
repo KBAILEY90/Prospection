@@ -5,33 +5,37 @@ on:
     - cron: '0 */1 * * *'  # Every hour
   workflow_dispatch:
 
+# Only one run at a time -- queue rather than cancel so no work is lost
+concurrency:
+  group: prospection-scraper
+  cancel-in-progress: false
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
-      with:
-        persist-credentials: true  # Needed for commit + push
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: true  # Needed for commit + push
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libspatialindex-dev
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libspatialindex-dev
+          pip install -r requirements.txt
 
-    - name: Run script
-      run: python "2.Prospection.py"
+      - name: Run script
+        run: python "2.Prospection.py"
 
-    - name: Commit and push updated CSVs
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-        git commit -m "Auto-update CSV files" || echo "No changes to commit"
-        git push
+      - name: Commit and push updated CSVs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
+          git commit -m "Auto-update CSV files" || echo "No changes to commit"
+          git pull --rebase && git push || git push
