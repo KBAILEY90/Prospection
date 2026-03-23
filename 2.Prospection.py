@@ -13,6 +13,10 @@ Improvements over original:
   * PERF       Removed fixed 1 s sleep between addresses (wait.until is enough).
   * FIX        Navigate to search page per address (clean Angular state).
   * PERF       Thread-safe CSV writes with in-memory duplicate guard.
+  * FIX        Retry logic: up to MAX_RETRIES attempts per address before giving up.
+  * FIX        Overlay/intercept handler: dismiss dialog instead of sleeping 60 s.
+  * DEBUG      Rich error context logged on every failure (URL, input value,
+               visible options, any dialog text).
 """
 
 import csv
@@ -24,6 +28,11 @@ import concurrent.futures
 
 import pandas as pd
 from selenium import webdriver
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    TimeoutException,
+    NoSuchElementException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -33,9 +42,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # -- Configuration -------------------------------------------------------------
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
-TIMEOUT        = 5       # seconds -- required page elements
+TIMEOUT        = 8       # seconds -- required page elements (raised from 5 to 8)
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
+MAX_RETRIES    = 2       # max extra attempts per address before marking inaccessible
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
@@ -127,6 +137,94 @@ def optional_cell(driver, xpath: str) -> str:
         return ""
 
 
+def get_error_context(driver) -> str:
+    """
+    Collect diagnostic info from the current page state to help explain why
+    an address failed. Logged alongside every FAIL/RETRY line.
+    """
+    parts = []
+
+    # Where are we?
+    try:
+        parts.append(f"url={driver.current_url}")
+    except Exception:
+        parts.append("url=N/A")
+
+    # What's in the search input?
+    try:
+        val = driver.find_element(
+            By.CSS_SELECTOR, 'input[placeholder="Adresse..."]'
+        ).get_attribute("value")
+        parts.append(f"input='{val}'")
+    except Exception:
+        parts.append("input=N/A")
+
+    # Are there autocomplete options visible?
+    try:
+        opts = driver.find_elements(By.CSS_SELECTOR, "mat-option")
+        if opts:
+            parts.append(f"options=[{', '.join(o.text[:25] for o in opts[:3])}]")
+        else:
+            parts.append("options=none")
+    except Exception:
+        parts.append("options=error")
+
+    # Is there a "no results" message?
+    try:
+        no_res = driver.find_elements(
+            By.XPATH,
+            '//*[contains(translate(text(),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),'
+            '"aucun") or contains(translate(text(),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"no result")]',
+        )
+        if no_res:
+            parts.append(f"no_results='{no_res[0].text[:40]}'")
+    except Exception:
+        pass
+
+    # Any visible dialog / overlay?
+    try:
+        dialogs = driver.find_elements(
+            By.CSS_SELECTOR, '[role="dialog"], [class*="modal"], [class*="overlay"]'
+        )
+        visible = [d for d in dialogs if d.is_displayed()]
+        if visible:
+            parts.append(f"dialog='{visible[0].text[:60]}'")
+    except Exception:
+        pass
+
+    return "  |  ".join(parts)
+
+
+def dismiss_overlay(driver) -> bool:
+    """
+    Try to close any cookie-consent or modal overlay that might be
+    intercepting clicks. Returns True if something was dismissed.
+    """
+    selectors = [
+        # Generic close / accept buttons
+        'button[class*="close"]',
+        'button[class*="accept"]',
+        'button[class*="agree"]',
+        'button[class*="ok"]',
+        '[class*="cookie"] button',
+        '[class*="consent"] button',
+        '[aria-label*="close"]',
+        '[aria-label*="fermer"]',
+        # Angular Material dialog close
+        'mat-dialog-container button',
+    ]
+    for sel in selectors:
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, sel)
+            if btn.is_displayed():
+                btn.click()
+                time.sleep(0.5)
+                return True
+        except (NoSuchElementException, Exception):
+            continue
+    return False
+
+
 def safe_write_listed(fields: list) -> None:
     with write_lock:
         with open(listed_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -164,83 +262,130 @@ def worker(worker_id: int) -> None:
 
         row = joined_df.loc[joined_df["ADRESSE"] == a].iloc[0]
 
-        try:
-            # -- Navigate to search page for clean Angular state each time ----
-            driver.get(SEARCH_URL)
+        success = False
+        last_err = ""
 
-            # -- Search -------------------------------------------------------
-            inp = wait.until(EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
-            ))
-            inp.click()
-            inp.send_keys(a)
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                # -- Navigate to search page for clean Angular state ----------
+                driver.get(SEARCH_URL)
 
-            # Wait for autocomplete
-            suggestion = wait.until(EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
-            ))
-            suggestion.click()
+                # -- Search ---------------------------------------------------
+                inp = wait.until(EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
+                ))
+                inp.click()
+                inp.send_keys(a)
 
-            # -- Extract data -------------------------------------------------
-            ownerName    = get_cell(wait, driver, '//tr[td[text()="Nom:"]]/td[2]')
-            ownerAddress = get_cell(wait, driver, '//tr[td[text()="Adresse Postale:"]]/td[2]')
+                # Wait for autocomplete suggestion
+                suggestion = wait.until(EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
+                ))
+                suggestion.click()
 
-            # FIX: contains() avoids U+2019 (curled ') vs U+0027 (straight ') mismatch
-            inscriptionDate  = get_cell(wait, driver,
-                                        '//tr[td[contains(text(),"inscription au r")]]/td[2]')
-            # Optional -- vacant lots won't have these rows
-            constructionDate = optional_cell(driver, '//tr[td[text()="Ann\u00e9e de construction:"]]/td[2]')
-            units            = optional_cell(driver, '//tr[td[text()="Nombre de logements:"]]/td[2]')
+                # -- Extract data ---------------------------------------------
+                ownerName    = get_cell(wait, driver, '//tr[td[text()="Nom:"]]/td[2]')
+                ownerAddress = get_cell(wait, driver, '//tr[td[text()="Adresse Postale:"]]/td[2]')
 
-            url   = driver.current_url
-            gmaps = row.get(gmaps_col, "")
-
-            safe_write_listed([
-                a, row["RUE"], units, constructionDate,
-                row["NO_ZONE"], row["GRILLEUSAGE"], row["ARRONDISSEMENT"],
-                ownerName, ownerAddress, inscriptionDate, url, gmaps,
-            ])
-
-            with stats_lock:
-                stats["ok"] += 1
-                done_n = stats["ok"] + stats["fail"]
-                remaining = address_queue.qsize()
-                rate = done_n / max(time.time() - _t0, 1)
-                eta_min = remaining / rate / 60 if rate > 0 else 0
-                print(
-                    f"[W{worker_id}] OK {a:<35} "
-                    f"({done_n}/{total})  ~{remaining} left  "
-                    f"ETA {eta_min:.0f} min",
-                    flush=True,
+                # FIX: contains() avoids U+2019 (curled ') vs U+0027 (straight ') mismatch
+                inscriptionDate  = get_cell(
+                    wait, driver,
+                    '//tr[td[contains(text(),"inscription au r")]]/td[2]'
+                )
+                # Optional -- vacant lots won't have these rows
+                constructionDate = optional_cell(
+                    driver, '//tr[td[text()="Ann\u00e9e de construction:"]]/td[2]'
+                )
+                units = optional_cell(
+                    driver, '//tr[td[text()="Nombre de logements:"]]/td[2]'
                 )
 
-        except Exception as e:
-            err = str(e)
-            safe_name = a.replace(" ", "_")[:40]
-            driver.save_screenshot(f"errors/w{worker_id}_{safe_name}.png")
+                url   = driver.current_url
+                gmaps = row.get(gmaps_col, "")
 
-            if "element click intercepted" in err:
-                print(f"[W{worker_id}] WARN Rate limit -- pausing 60 s, re-queuing {a}", flush=True)
-                time.sleep(60)
-                address_queue.put(a)   # re-queue for retry
-                continue
+                safe_write_listed([
+                    a, row["RUE"], units, constructionDate,
+                    row["NO_ZONE"], row["GRILLEUSAGE"], row["ARRONDISSEMENT"],
+                    ownerName, ownerAddress, inscriptionDate, url, gmaps,
+                ])
 
-            elif "invalid session id" in err or "target window already closed" in err:
-                print(f"[W{worker_id}] FAIL Session lost -- stopping worker", flush=True)
-                break
-
-            else:
                 with stats_lock:
-                    stats["fail"] += 1
+                    stats["ok"] += 1
                     done_n = stats["ok"] + stats["fail"]
+                    remaining = address_queue.qsize()
+                    rate = done_n / max(time.time() - _t0, 1)
+                    eta_min = remaining / rate / 60 if rate > 0 else 0
+                    retry_tag = f" (retry {attempt})" if attempt > 0 else ""
                     print(
-                        f"[W{worker_id}] FAIL {a}: {err[:100]}  ({done_n}/{total})",
+                        f"[W{worker_id}] OK {a:<35}{retry_tag} "
+                        f"({done_n}/{total})  ~{remaining} left  "
+                        f"ETA {eta_min:.0f} min",
                         flush=True,
                     )
-                safe_write_inaccessible(row)
-                continue
 
-        # Periodic git commit (only one worker needs to do it -- first to hit the interval)
+                success = True
+                break  # exit retry loop
+
+            except ElementClickInterceptedException as e:
+                ctx = get_error_context(driver)
+                safe_name = a.replace(" ", "_")[:40]
+                driver.save_screenshot(f"errors/w{worker_id}_{safe_name}_a{attempt}.png")
+
+                # Try to dismiss whatever is blocking the click
+                dismissed = dismiss_overlay(driver)
+                print(
+                    f"[W{worker_id}] INTERCEPTED attempt={attempt} {a} "
+                    f"(overlay_dismissed={dismissed})  {ctx}",
+                    flush=True,
+                )
+                last_err = f"ElementClickInterceptedException  {ctx}"
+                # Short pause before retry
+                time.sleep(2)
+
+            except TimeoutException as e:
+                ctx = get_error_context(driver)
+                safe_name = a.replace(" ", "_")[:40]
+                driver.save_screenshot(f"errors/w{worker_id}_{safe_name}_a{attempt}.png")
+
+                print(
+                    f"[W{worker_id}] TIMEOUT attempt={attempt} {a}  {ctx}",
+                    flush=True,
+                )
+                last_err = f"TimeoutException  {ctx}"
+                # Brief pause before retry
+                time.sleep(1)
+
+             except Exception as e:
+                err = str(e)
+                ctx = get_error_context(driver)
+                safe_name = a.replace(" ", "_")[:40]
+                driver.save_screenshot(f"errors/w{worker_id}_{safe_name}_a{attempt}.png")
+
+                if "invalid session id" in err or "target window already closed" in err:
+                    print(f"[W{worker_id}] FATAL Session lost -- stopping worker", flush=True)
+                    driver.quit()
+                    return
+
+                print(
+                    f"[W{worker_id}] ERROR attempt={attempt} {a}: {err[:120]}  {ctx}",
+                    flush=True,
+                )
+                last_err = f"{err[:80]}  {ctx}"
+                time.sleep(1)
+
+        # -- After all attempts -----------------------------------------------
+        if not success:
+            with stats_lock:
+                stats["fail"] += 1
+                done_n = stats["ok"] + stats["fail"]
+                print(
+                    f"[W{worker_id}] FAIL {a} after {MAX_RETRIES + 1} attempts: "
+                    f"{last_err[:120]}  ({done_n}/{total})",
+                    flush=True,
+                )
+            safe_write_inaccessible(row)
+
+        # Periodic git commit
         if time.time() - last_commit > COMMIT_EVERY:
             commit_changes()
             last_commit = time.time()
@@ -252,7 +397,7 @@ def worker(worker_id: int) -> None:
 # -- Main ----------------------------------------------------------------------
 if __name__ == "__main__":
     _t0 = time.time()
-    print(f"Launching {N_WORKERS} parallel worker(s)...", flush=True)
+    print(f"Launching {N_WORKERS_parallel worker(s)...", flush=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
         futures = {pool.submit(worker, i + 1): i for i in range(N_WORKERS)}
