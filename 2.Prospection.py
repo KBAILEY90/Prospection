@@ -42,10 +42,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # -- Configuration -------------------------------------------------------------
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
-TIMEOUT        = 8       # seconds -- required page elements (raised from 5 to 8)
+TIMEOUT        = 30      # seconds -- required page elements (raised from 5 to 30 to reduce false timeouts)
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
-MAX_RETRIES    = 2       # max extra attempts per address before marking inaccessible
+MAX_RETRIES    = 0       # max extra attempts per address before marking inaccessible
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
