@@ -40,6 +40,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
+# Pre-install chromedriver once (avoids concurrent-thread race condition)
+_DRIVER_PATH = ChromeDriverManager().install()
+
 # -- Configuration -------------------------------------------------------------
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
 TIMEOUT        = 60      # seconds -- required page elements (raised from 5 to 30 to reduce false timeouts)
@@ -103,6 +106,7 @@ for a in todo:
 write_lock  = threading.Lock()   # guards listed_path writes
 inacc_lock  = threading.Lock()   # guards inaccessible_path writes + inacc_seen
 stats_lock  = threading.Lock()   # guards stats dict
+commit_lock = threading.Lock()   # guards git commit/push operations
 
 inacc_seen  = set(inaccessible_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
 stats       = {"ok": 0, "fail": 0}
@@ -117,7 +121,7 @@ def make_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1280,900")
     return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=opts
+        service=Service(_DRIVER_PATH), options=opts
     )
 
 
@@ -242,11 +246,12 @@ def safe_write_inaccessible(row) -> None:
 
 
 def commit_changes() -> None:
-    os.system('git config user.name  "github-actions[bot]"')
+    with commit_lock:
+        os.system('git config user.name  "github-actions[bot]"')
     os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
     os.system(f'git add "{listed_path}" "{inaccessible_path}"')
     os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
-    os.system("git pull --rebase && git push || git push")
+    os.system("git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease")
 
 
 # -- Worker --------------------------------------------------------------------
