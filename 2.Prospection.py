@@ -42,7 +42,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # -- Configuration -------------------------------------------------------------
 N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU)
-TIMEOUT        = 30      # seconds -- required page elements (raised from 5 to 30 to reduce false timeouts)
+TIMEOUT        = 60      # seconds -- required page elements (raised from 5 to 30 to reduce false timeouts)
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
 MAX_RETRIES    = 0       # max extra attempts per address before marking inaccessible
@@ -362,6 +362,18 @@ def worker(worker_id: int) -> None:
                 ctx = get_error_context(driver)
                 safe_name = a.replace(" ", "_")[:40]
                 driver.save_screenshot(f"errors/w{worker_id}_{safe_name}_a{attempt}.png")
+
+                # Detect rate limit manifesting as a page timeout
+                if "Limite de consultations" in ctx:
+                    print(
+                        f"[W{worker_id}] RATE_LIMIT(timeout) {a} -- hourly limit reached, "
+                        f"sleeping {RATE_LIMIT_SLEEP}s then re-queuing",
+                        flush=True,
+                    )
+                    time.sleep(RATE_LIMIT_SLEEP)
+                    address_queue.put(a)
+                    rate_limited = True
+                    break
 
                 print(
                     f"[W{worker_id}] TIMEOUT attempt={attempt} {a}  {ctx}",
