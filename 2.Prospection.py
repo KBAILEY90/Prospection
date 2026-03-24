@@ -397,7 +397,7 @@ def worker(worker_id: int) -> None:
 # -- Main ----------------------------------------------------------------------
 if __name__ == "__main__":
     _t0 = time.time()
-    print(f"Launching {N_WORKERS_parallel worker(s)...", flush=True)
+    print(f"Launching {N_WORKERS} parallel worker(s)...", flush=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
         futures = {pool.submit(worker, i + 1): i for i in range(N_WORKERS)}
