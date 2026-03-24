@@ -46,6 +46,8 @@ TIMEOUT        = 30      # seconds -- required page elements (raised from 5 to 3
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
 MAX_RETRIES    = 0       # max extra attempts per address before marking inaccessible
+RATE_LIMIT_SLEEP = 1800  # seconds to pause when the site's hourly query limit is hit
+REQUEST_DELAY  = 15      # seconds to wait between addresses (throttle to stay within hourly limit)
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
@@ -262,8 +264,9 @@ def worker(worker_id: int) -> None:
 
         row = joined_df.loc[joined_df["ADRESSE"] == a].iloc[0]
 
-        success = False
-        last_err = ""
+        success      = False
+        last_err     = ""
+        rate_limited = False
 
         for attempt in range(MAX_RETRIES + 1):
             try:
@@ -333,6 +336,19 @@ def worker(worker_id: int) -> None:
 
                 # Try to dismiss whatever is blocking the click
                 dismissed = dismiss_overlay(driver)
+
+                # Detect the site's hourly consultation rate limit
+                if "Limite de consultations" in ctx:
+                    print(
+                        f"[W{worker_id}] RATE_LIMIT {a} -- hourly limit reached, "
+                        f"sleeping {RATE_LIMIT_SLEEP}s then re-queuing",
+                        flush=True,
+                    )
+                    time.sleep(RATE_LIMIT_SLEEP)
+                    address_queue.put(a)   # re-queue address to retry after limit resets
+                    rate_limited = True
+                    break
+
                 print(
                     f"[W{worker_id}] INTERCEPTED attempt={attempt} {a} "
                     f"(overlay_dismissed={dismissed})  {ctx}",
@@ -374,7 +390,7 @@ def worker(worker_id: int) -> None:
                 time.sleep(1)
 
         # -- After all attempts -----------------------------------------------
-        if not success:
+        if not success and not rate_limited:
             with stats_lock:
                 stats["fail"] += 1
                 done_n = stats["ok"] + stats["fail"]
@@ -384,6 +400,10 @@ def worker(worker_id: int) -> None:
                     flush=True,
                 )
             safe_write_inaccessible(row)
+
+        # Throttle requests to stay within the site's hourly query limit
+        if not rate_limited:
+            time.sleep(REQUEST_DELAY)
 
         # Periodic git commit
         if time.time() - last_commit > COMMIT_EVERY:
