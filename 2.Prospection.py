@@ -364,7 +364,13 @@ def worker(worker_id: int) -> None:
                 driver.save_screenshot(f"errors/w{worker_id}_{safe_name}_a{attempt}.png")
 
                 # Detect rate limit manifesting as a page timeout
-                if "Limite de consultations" in ctx:
+                # Check BOTH ctx (form context) and raw page source (dialog text)
+                _page_src = ""
+                try:
+                    _page_src = driver.page_source
+                except Exception:
+                    pass
+                if "Limite de consultations" in ctx or "Limite de consultations" in _page_src:
                     print(
                         f"[W{worker_id}] RATE_LIMIT(timeout) {a} -- hourly limit reached, "
                         f"sleeping {RATE_LIMIT_SLEEP}s then re-queuing",
