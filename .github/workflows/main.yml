@@ -2,8 +2,11 @@ name: Run Prospection Script
 
 on:
   schedule:
-    - cron: '0 */1 * * *'  # Every hour
+    - cron: '0 */1 * * *' # Every hour
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 # Only one run at a time -- queue rather than cancel so no work is lost
 concurrency:
@@ -16,7 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          persist-credentials: true  # Needed for commit + push
+          fetch-depth: 0
+          persist-credentials: true # Needed for commit + push
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -37,5 +41,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Auto-update CSV files" || echo "No changes to commit"
-          git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease
+          git commit -m "Auto-save progress" || echo "No changes to commit"
+          git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"
