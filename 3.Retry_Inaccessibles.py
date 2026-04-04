@@ -167,15 +167,18 @@ def _scrape_fields(driver, wait, row):
 
 
 def _handle_rate_limit(driver, inacc_df, rescued, label=""):
+    import datetime as _dt
+    now = _dt.datetime.utcnow()
+    next_hour = (now + _dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    sleep_time = max(int((next_hour - now).total_seconds()) + 120, 120)
     print(
         f"[RATE-LIMIT{label}]  Hourly limit reached after {len(rescued)} rescues. "
-        f"Sleeping {RATE_LIMIT_SLEEP // 60} min ..."
+        f"Sleeping {sleep_time // 60}m {sleep_time % 60}s until next UTC-hour reset ..."
     )
     _save_progress(inacc_df, rescued)
     commit_changes()
-    time.sleep(RATE_LIMIT_SLEEP)
+    time.sleep(sleep_time)
     driver.get(SEARCH_URL)
-
 
 def _save_progress(inacc_df, rescued):
     if rescued:
