@@ -84,7 +84,7 @@ def commit_changes() -> None:
     os.system(f'git add "{LISTED_PATH}" "{INACCESSIBLE_PATH}"')
     os.system("git commit -m 'Retry inaccessibles — auto-save' || echo 'No changes to commit'")
     os.system(
-        "git pull --no-rebase -s recursive -X union && git push "
+        "git pull --rebase && git push "
         "|| echo 'Push failed — will retry next commit cycle'"
     )
 
