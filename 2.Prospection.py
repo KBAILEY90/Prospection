@@ -23,6 +23,7 @@ import csv
 import os
 import time
 import threading
+import datetime
 from queue import Queue, Empty
 import concurrent.futures
 
@@ -49,7 +50,6 @@ TIMEOUT        = 60      # seconds -- required page elements (raised from 5 to 3
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
 MAX_RETRIES    = 0       # max extra attempts per address before marking inaccessible
-RATE_LIMIT_SLEEP = 1800  # seconds to pause when the site's hourly query limit is hit
 REQUEST_DELAY  = 15      # seconds to wait between addresses (throttle to stay within hourly limit)
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
@@ -248,10 +248,10 @@ def safe_write_inaccessible(row) -> None:
 def commit_changes() -> None:
     with commit_lock:
         os.system('git config user.name  "github-actions[bot]"')
-    os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
-    os.system(f'git add "{listed_path}" "{inaccessible_path}"')
-    os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
-    os.system("git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease")
+        os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
+        os.system(f'git add "{listed_path}" "{inaccessible_path}"')
+        os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
+        os.system("git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease")
 
 
 # -- Worker --------------------------------------------------------------------
@@ -344,12 +344,15 @@ def worker(worker_id: int) -> None:
 
                 # Detect the site's hourly consultation rate limit
                 if "Limite de consultations" in ctx:
+                    now = datetime.datetime.utcnow()
+                    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                    sleep_time = max(int((next_hour - now).total_seconds()) + 120, 120)
                     print(
                         f"[W{worker_id}] RATE_LIMIT {a} -- hourly limit reached, "
-                        f"sleeping {RATE_LIMIT_SLEEP}s then re-queuing",
+                        f"sleeping {sleep_time // 60}m {sleep_time % 60}s until next UTC-hour reset",
                         flush=True,
                     )
-                    time.sleep(RATE_LIMIT_SLEEP)
+                    time.sleep(sleep_time)
                     address_queue.put(a)   # re-queue address to retry after limit resets
                     rate_limited = True
                     break
@@ -376,12 +379,15 @@ def worker(worker_id: int) -> None:
                 except Exception:
                     pass
                 if "Limite de consultations" in ctx or "Limite de consultations" in _page_src:
+                    now = datetime.datetime.utcnow()
+                    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                    sleep_time = max(int((next_hour - now).total_seconds()) + 120, 120)
                     print(
                         f"[W{worker_id}] RATE_LIMIT(timeout) {a} -- hourly limit reached, "
-                        f"sleeping {RATE_LIMIT_SLEEP}s then re-queuing",
+                        f"sleeping {sleep_time // 60}m {sleep_time % 60}s until next UTC-hour reset",
                         flush=True,
                     )
-                    time.sleep(RATE_LIMIT_SLEEP)
+                    time.sleep(sleep_time)
                     address_queue.put(a)
                     rate_limited = True
                     break
