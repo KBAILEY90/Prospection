@@ -89,9 +89,22 @@ done = set(
 )
 
 todo = [a for a in joined_df["ADRESSE"].tolist() if a not in done]
+
+# -- Sharding ------------------------------------------------------------------
+# In Phase 1 both GitHub workflows run this script in parallel on separate
+# runners (separate IPs => separate hourly rate-limit budgets). To avoid both
+# runners scraping the same addresses, each takes a disjoint slice of the todo
+# list keyed by its shard. Defaults (0/1) reproduce the original single-runner
+# behaviour when the env vars are absent.
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+SHARD_COUNT = int(os.environ.get("SHARD_COUNT", "1"))
+if SHARD_COUNT > 1:
+    todo = [a for i, a in enumerate(todo) if i % SHARD_COUNT == SHARD_INDEX]
+
 total = len(todo)
 print(f"Total addresses : {len(joined_df)}")
 print(f"Already done    : {len(done)}")
+print(f"Shard           : {SHARD_INDEX + 1}/{SHARD_COUNT}")
 print(f"Remaining       : {total}")
 
 if not todo:
@@ -109,6 +122,7 @@ stats_lock  = threading.Lock()   # guards stats dict
 commit_lock = threading.Lock()   # guards git commit/push operations
 
 inacc_seen  = set(inaccessible_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
+listed_seen = set(listed_df.get("ADRESSE", pd.Series(dtype=str)).dropna())
 stats       = {"ok": 0, "fail": 0}
 _t0         = time.time()
 
@@ -232,7 +246,12 @@ def dismiss_overlay(driver) -> bool:
 
 
 def safe_write_listed(fields: list) -> None:
+    # fields[0] is ADRESSE. Guard against duplicates so two parallel shards (or
+    # a re-queued address after a rate-limit sleep) never write the same row twice.
     with write_lock:
+        if fields[0] in listed_seen:
+            return
+        listed_seen.add(fields[0])
         with open(listed_path, "a", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow(fields)
 
@@ -251,7 +270,10 @@ def commit_changes() -> None:
         os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
         os.system(f'git add "{listed_path}" "{inaccessible_path}"')
         os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
-        os.system("git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease")
+        # Union merge, never force-push: two parallel prospection shards append
+        # to the same CSVs, so a force-push would silently drop the other shard's
+        # commits (documented bug #1). A failed push just retries next cycle.
+        os.system("git pull --no-rebase -s recursive -X union && git push || echo 'Push failed — will retry next commit cycle'")
 
 
 # -- Worker --------------------------------------------------------------------

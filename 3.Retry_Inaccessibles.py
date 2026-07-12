@@ -29,6 +29,22 @@ import os
 import time
 
 import pandas as pd
+
+# ── Sharding ────────────────────────────────────────────────────────────────────
+# In Phase 2 both GitHub workflows run this script in parallel on separate
+# runners (separate IPs => separate hourly rate-limit budgets). Each takes a
+# disjoint slice of the inaccessibles list keyed by its shard so they never
+# retry the same address. Defaults (0/1) reproduce single-runner behaviour.
+#
+# Concurrency-safety of the CSV writes:
+#   * Both shards only APPEND rescued rows to Liste_Prospection.csv; the
+#     union-merge commit (see commit_changes) merges concurrent appends cleanly.
+#   * Only shard 0 ever REWRITES Adresses_Inaccessibles.csv (reconcile step),
+#     giving that file a single writer so removed rows are never resurrected by
+#     the union merge.
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+SHARD_COUNT = int(os.environ.get("SHARD_COUNT", "1"))
+IS_RECONCILER = SHARD_INDEX == 0
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -83,8 +99,11 @@ def commit_changes() -> None:
     os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
     os.system(f'git add "{LISTED_PATH}" "{INACCESSIBLE_PATH}"')
     os.system("git commit -m 'Retry inaccessibles — auto-save' || echo 'No changes to commit'")
+    # Union merge (not rebase): lets two parallel shards append to
+    # Liste_Prospection.csv without clobbering each other. No force-push — a
+    # failed push is simply retried on the next commit cycle. See CLAUDE.md.
     os.system(
-        "git pull --rebase && git push "
+        "git pull --no-rebase -s recursive -X union && git push "
         "|| echo 'Push failed — will retry next commit cycle'"
     )
 
@@ -166,7 +185,7 @@ def _scrape_fields(driver, wait, row):
     ]
 
 
-def _handle_rate_limit(driver, inacc_df, rescued, label=""):
+def _handle_rate_limit(driver, rescued, label=""):
     import datetime as _dt
     now = _dt.datetime.utcnow()
     next_hour = (now + _dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
@@ -175,15 +194,39 @@ def _handle_rate_limit(driver, inacc_df, rescued, label=""):
         f"[RATE-LIMIT{label}]  Hourly limit reached after {len(rescued)} rescues. "
         f"Sleeping {sleep_time // 60}m {sleep_time % 60}s until next UTC-hour reset ..."
     )
-    _save_progress(inacc_df, rescued)
-    commit_changes()
+    save_progress()
     time.sleep(sleep_time)
     driver.get(SEARCH_URL)
 
-def _save_progress(inacc_df, rescued):
-    if rescued:
-        inacc_df.drop(index=rescued).to_csv(INACCESSIBLE_PATH, index=False, encoding="utf-8-sig")
-        print(f"  -> Removed {len(rescued)} rescued row(s) from Adresses_Inaccessibles.csv")
+
+def reconcile_inaccessibles():
+    """Rewrite Adresses_Inaccessibles.csv, dropping every address that now
+    appears in Liste_Prospection.csv (i.e. rescued by either shard).
+
+    Only shard 0 runs this, so the file has a single writer and the union-merge
+    commit never resurrects removed rows. Reads both files fresh from disk so it
+    also cleans up rows rescued by the other shard."""
+    try:
+        inacc  = pd.read_csv(INACCESSIBLE_PATH, encoding="utf-8-sig")
+        listed = pd.read_csv(LISTED_PATH, encoding="utf-8-sig")
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return
+    listed_addr = set(listed.get("ADRESSE", pd.Series(dtype=str)).dropna())
+    before = len(inacc)
+    inacc = inacc[~inacc["ADRESSE"].isin(listed_addr)]
+    if len(inacc) != before:
+        inacc.to_csv(INACCESSIBLE_PATH, index=False, encoding="utf-8-sig")
+        print(f"  -> Reconciled: dropped {before - len(inacc)} rescued row(s) "
+              f"from Adresses_Inaccessibles.csv")
+
+
+def save_progress():
+    """Persist progress: reconcile the inaccessibles file (shard 0 only) then
+    commit the appended rescues. Rescued rows are already appended to
+    Liste_Prospection.csv during the loop, so shard >0 only needs to commit."""
+    if IS_RECONCILER:
+        reconcile_inaccessibles()
+    commit_changes()
 
 
 def main():
@@ -196,19 +239,41 @@ def main():
         print("Adresses_Inaccessibles.csv is empty — nothing to retry.")
         return
 
-    total = len(inacc_df)
-    print(f"Retrying {total} addresses ...\n")
-
     if not os.path.exists(LISTED_PATH):
         with open(LISTED_PATH, "w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow(LISTED_COLS)
+
+    # Skip anything already rescued (present in Liste_Prospection.csv). This
+    # prevents re-scraping — and duplicate Liste rows — when a row was rescued
+    # by the other shard but not yet reconciled out of the inaccessibles file.
+    try:
+        already_listed = set(
+            pd.read_csv(LISTED_PATH, encoding="utf-8-sig")
+            .get("ADRESSE", pd.Series(dtype=str)).dropna()
+        )
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        already_listed = set()
+
+    # Assign a disjoint slice of the inaccessibles to this shard.
+    work = [
+        (idx, row) for i, (idx, row) in enumerate(inacc_df.iterrows())
+        if i % SHARD_COUNT == SHARD_INDEX and str(row["ADRESSE"]) not in already_listed
+    ]
+    total = len(work)
+    print(f"Shard {SHARD_INDEX + 1}/{SHARD_COUNT}: retrying {total} of "
+          f"{len(inacc_df)} inaccessible addresses ...\n")
+
+    if total == 0:
+        print("Nothing to retry for this shard.")
+        save_progress()   # shard 0 still reconciles rows the other shard rescued
+        return
 
     driver      = make_driver()
     wait        = WebDriverWait(driver, FIELD_TIMEOUT)
     rescued     = []
     last_commit = time.time()
 
-    for idx, row in inacc_df.iterrows():
+    for idx, row in work:
         a = str(row["ADRESSE"])
         time.sleep(REQUEST_DELAY)
 
@@ -224,7 +289,7 @@ def main():
 
         except TimeoutException:
             if is_rate_limited(driver):
-                _handle_rate_limit(driver, inacc_df, rescued)
+                _handle_rate_limit(driver, rescued)
                 # Retry same address after waking up
                 try:
                     suggestion = search_address(driver, wait, a)
@@ -242,7 +307,7 @@ def main():
         except ElementClickInterceptedException as e:
             # Rate-limit modal can intercept clicks to the input itself
             if is_rate_limited(driver):
-                _handle_rate_limit(driver, inacc_df, rescued, " (click-intercepted)")
+                _handle_rate_limit(driver, rescued, " (click-intercepted)")
                 try:
                     suggestion = search_address(driver, wait, a)
                     suggestion.click()
@@ -273,19 +338,18 @@ def main():
             except Exception: pass
 
         if time.time() - last_commit > COMMIT_EVERY:
-            _save_progress(inacc_df, rescued)
-            commit_changes()
+            save_progress()
             last_commit = time.time()
 
     driver.quit()
-    _save_progress(inacc_df, rescued)
+    save_progress()
 
     remaining = total - len(rescued)
     print(f"\n{'=' * 56}")
     print(f"Rescued  : {len(rescued)}/{total}")
     print(f"Remaining: {remaining}")
     print(f"{'=' * 56}")
-    commit_changes()
+    save_progress()
     print("Done.")
 
 

@@ -33,8 +33,18 @@ jobs:
           sudo apt-get install -y libspatialindex-dev
           pip install -r requirements.txt
 
-      - name: Run script
-        run: python "2.Prospection.py"
+      - name: Run scraper (phase-aware, shard 0)
+        env:
+          SHARD_INDEX: "0"
+          SHARD_COUNT: "2"
+        run: |
+          PHASE=$(python phase.py)
+          echo "Detected phase: $PHASE"
+          if [ "$PHASE" = "retry" ]; then
+            python "3.Retry_Inaccessibles.py"
+          else
+            python "2.Prospection.py"
+          fi
 
       - name: Commit and push updated CSVs
         run: |
