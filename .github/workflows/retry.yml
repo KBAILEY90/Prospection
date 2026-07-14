@@ -36,8 +36,18 @@ jobs:
       - name: Install Python dependencies
         run: pip install selenium webdriver-manager pandas
 
-      - name: Run retry script
-        run: python 3.Retry_Inaccessibles.py
+      - name: Run scraper (phase-aware, shard 1)
+        env:
+          SHARD_INDEX: "1"
+          SHARD_COUNT: "2"
+        run: |
+          PHASE=$(python phase.py)
+          echo "Detected phase: $PHASE"
+          if [ "$PHASE" = "retry" ]; then
+            python 3.Retry_Inaccessibles.py
+          else
+            python "2.Prospection.py"
+          fi
 
       - name: Commit and push updated CSVs
         run: |
@@ -45,4 +55,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
           git commit -m "Retry inaccessibles — auto-update CSVs" || echo "No changes to commit"
-          git pull --rebase && git push || echo "Push failed — will retry next run"
+          # Union merge (matches main.yml): safe for concurrent appends from two shards. Never force-push.
+          git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"
