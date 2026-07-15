@@ -49,8 +49,13 @@ N_WORKERS      = 2       # parallel Chrome instances (safe for GH Actions 2-vCPU
 TIMEOUT        = 60      # seconds -- required page elements (raised from 5 to 30 to reduce false timeouts)
 OPT_TIMEOUT    = 2       # seconds -- optional fields (may be absent on vacant lots)
 COMMIT_EVERY   = 300     # seconds between git auto-commits
-MAX_RETRIES    = 0       # max extra attempts per address before marking inaccessible
+MAX_RETRIES    = 1       # max extra attempts per address before marking inaccessible
 REQUEST_DELAY  = 15      # seconds to wait between addresses (throttle to stay within hourly limit)
+# Autocomplete typing (backported from 3.Retry_Inaccessibles.py -- Angular
+# mat-autocomplete debounces input events; one-shot send_keys never triggers it)
+CHAR_DELAY      = 0.05   # seconds between individual keystrokes
+POST_TYPE_PAUSE = 0.6    # seconds after last keystroke
+SUGGEST_TIMEOUT = 6      # seconds to wait for mat-option suggestion
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
@@ -251,7 +256,9 @@ def commit_changes() -> None:
         os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
         os.system(f'git add "{listed_path}" "{inaccessible_path}"')
         os.system("git commit -m 'Auto-save progress' || echo 'No changes to commit'")
-        os.system("git pull --no-rebase --strategy-option=union && git push || git push --force-with-lease")
+        # NEVER force-push here: it overwrites retry's rescue commits on origin.
+        # Union merge resolves concurrent CSV appends; on failure just retry next cycle.
+        os.system("git pull --no-rebase -s recursive -X union && git push || echo 'Push failed -- will retry next cycle'")
 
 
 # -- Worker --------------------------------------------------------------------
@@ -283,12 +290,38 @@ def worker(worker_id: int) -> None:
                     (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
                 ))
                 inp.click()
-                inp.send_keys(a)
+                inp.clear()
 
-                # Wait for autocomplete suggestion
-                suggestion = wait.until(EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
-                ))
+                # Strategy 1: slow char-by-char typing so Angular's debounced
+                # autocomplete actually fires (root cause of most inaccessibles)
+                for ch in a:
+                    inp.send_keys(ch)
+                    time.sleep(CHAR_DELAY)
+                time.sleep(POST_TYPE_PAUSE)
+
+                try:
+                    suggestion = WebDriverWait(driver, SUGGEST_TIMEOUT).until(
+                        EC.element_to_be_clickable(
+                            (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
+                        )
+                    )
+                except TimeoutException:
+                    # Strategy 2: native JS InputEvent fallback
+                    driver.execute_script(
+                        """
+                        var setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(arguments[0], arguments[1]);
+                        arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                        """,
+                        inp, a,
+                    )
+                    time.sleep(POST_TYPE_PAUSE)
+                    suggestion = WebDriverWait(driver, SUGGEST_TIMEOUT).until(
+                        EC.element_to_be_clickable(
+                            (By.CSS_SELECTOR, "mat-option.mat-mdc-option")
+                        )
+                    )
                 suggestion.click()
 
                 # -- Extract data ---------------------------------------------

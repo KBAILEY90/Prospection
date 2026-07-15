@@ -196,6 +196,12 @@ def main():
         print("Adresses_Inaccessibles.csv is empty — nothing to retry.")
         return
 
+    # Shuffle processing order: permanently-dead addresses accumulate at the
+    # head of the file, and in file order every run would re-fail them for
+    # hours before reaching rescuable rows. Index labels are preserved, so
+    # rescued/drop() bookkeeping is unaffected.
+    inacc_df = inacc_df.sample(frac=1)
+
     total = len(inacc_df)
     print(f"Retrying {total} addresses ...\n")
 

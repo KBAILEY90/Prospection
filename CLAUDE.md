@@ -21,7 +21,7 @@ Calculate:
 - **Inaccessible rows** = `Adresses_Inaccessibles.csv` line count − 1 (header)
 - **Inaccessible %** = Inaccessible ÷ (Listed + Inaccessible) × 100
 
-Current benchmark (Jun 19, 2026): ~12.2% — target is ≤10%.
+Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadily since Jun 19 because retry's rescue commits were being force-push-wiped; fixes deployed Jul 14, see bug list below.)
 
 ---
 
@@ -49,13 +49,19 @@ Current benchmark (Jun 19, 2026): ~12.2% — target is ≤10%.
 
 ## Bugs already fixed — do not revert
 
-1. **Force-push bug** (`2.Prospection.py`): old code was `git push || git push --force` — silently overwrote retry commits. Fixed to `git pull --rebase && git push || echo 'Push failed'`
+1. **Force-push bug** (`2.Prospection.py`) — fixed TWICE, do not reintroduce any `--force*` flag:
+   - v1: `git push || git push --force` silently overwrote retry commits.
+   - v2 (regression, fixed Jul 8 2026): `... && git push || git push --force-with-lease` — the lease matched because the pull had just fetched, so it still overwrote retry's rescue commits (observed as `(forced update)` on origin/main). Now: `git pull --no-rebase -s recursive -X union && git push || echo 'Push failed'`.
 2. **Retry commit_changes**: replaced fragile multi-line push block with rebase-abort-on-failure pattern
+3. **Autocomplete debounce bug** (fixed Jul 8 2026): `2.Prospection.py` used one-shot `send_keys(a)`; Angular's debounced mat-autocomplete never fired → TimeoutException → address wrongly marked inaccessible. This was the ~12–15% inflow floor. Backported the retry script's fix (char-by-char typing + JS `input`-event fallback). Also raised `MAX_RETRIES` 0→1.
+4. **Retry head-of-file grind** (fixed Jul 14 2026): `3.Retry_Inaccessibles.py` processed rows in file order; permanently-dead addresses accumulate at the head, so every run burned hours re-failing them before reaching rescuable rows. Now shuffles the order each run (`inacc_df.sample(frac=1)`).
+
+Note: fixes #1v2 and #3 were first pushed Jul 8 but were themselves erased by an in-flight workflow run still executing the old force-push code. Re-deployed Jul 14. If a `(forced update)` ever appears on origin/main again, check that these fixes are still present.
 
 ---
 
-## Why the rate is stuck at ~12%
-New addresses arrive at ~12–15% inaccessible (rate limiting hits mid-run), creating a floor. The retry script must rescue faster than prospection adds new inaccessibles. Possible lever: reduce addresses processed per prospection run to give retry breathing room.
+## Why the rate was rising (root cause found Jul 14 2026)
+Git history showed 178 commits in 7 days, ALL from prospection — zero surviving retry commits despite retry running 12×/day. Prospection's force-push fallback was erasing every retry rescue. Combined with the debounce bug feeding ~75 false inaccessibles/day, the rate climbed 12.2% → 14.4%. Both causes fixed; retry and prospection run on separate GitHub runners (separate IPs → separate hourly quotas), so retry is free parallel throughput — do NOT pause it to "give prospection room"; they don't compete.
 
 ---
 
@@ -68,8 +74,11 @@ New addresses arrive at ~12–15% inaccessible (rate limiting hits mid-run), cre
 | May 4    | 2,659       | ~21,393         | 12.4% |
 | May 23   | 3,223       | ~26,721         | 12.1% |
 | Jun 19   | ~3,275      | ~26,794         | 12.2% |
+| Jun 23   | 5,175       | 38,870          | 13.3% |
+| Jul 8    | 6,167       | 43,926          | 14.0% |
+| Jul 14   | 6,626       | 46,069          | 14.4% |
 
-Processing pace: ~490 addresses/day. Est. ~43k addresses remain → ~late August 2026 to finish Zonage.csv.
+Processing pace: ~352/day observed Jul 7 → Jul 14. Est. ~24k first-pass addresses remain → ~mid-September 2026 at that pace, with the backlog draining in parallel via retry now that its rescues persist. Throughput ceiling is the city site's hourly quota (~15/hr per runner); no code change moves it.
 
 ---
 
