@@ -36,6 +36,7 @@ Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadi
 | `data/Adresses_Inaccessibles.csv` | Addresses that hit rate limit |
 | `.github/workflows/main.yml` | Prospection workflow schedule |
 | `.github/workflows/retry.yml` | Retry workflow schedule |
+| `.github/workflows/canary-test.yml` | Manual-only (`workflow_dispatch`), no schedule — see below |
 
 ---
 
@@ -79,6 +80,18 @@ Git history showed 178 commits in 7 days, ALL from prospection — zero survivin
 | Jul 14   | 6,626       | 46,069          | 14.4% |
 
 Processing pace: ~352/day observed Jul 7 → Jul 14. Est. ~24k first-pass addresses remain → ~mid-September 2026 at that pace, with the backlog draining in parallel via retry now that its rescues persist. Throughput ceiling is the city site's hourly quota (~15/hr per runner); no code change moves it.
+
+---
+
+## Canary test workflow (added Jul 14 2026)
+`canary-test.yml` is a manual-only duplicate of `main.yml`, used to test whether Sherbrooke's hourly rate limit is scoped per-runner-IP (in which case a 3rd standing scraper job would add real throughput) or shared/broader across GitHub's IP pool (in which case a 3rd job wouldn't help and would waste runner minutes).
+
+**How to run the test:** trigger it manually from the Actions tab while a scheduled prospection or retry run is already in progress.
+**How to read it:** compare the two runs' logs for `RATE_LIMIT` lines.
+- Independent timing (each hits its own limit on its own schedule) → quotas are separate → safe to add a 3rd standing job.
+- Simultaneous / one run starves the other → quota is shared → don't add a 3rd job.
+
+Not yet run as of Jul 14 2026 — do this before adding any permanent 3rd scraper job.
 
 ---
 

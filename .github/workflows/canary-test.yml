@@ -1,0 +1,56 @@
+name: Canary Test - Concurrent Scrape
+
+# Manual-trigger-only duplicate of main.yml. Used to test whether Sherbrooke's
+# hourly rate limit is scoped per-runner-IP or shared/broader (e.g. per Azure
+# IP range). Trigger this manually (Actions tab -> Canary Test -> Run workflow)
+# at the same time a scheduled "Run Prospection Script" or "Retry Inaccessibles"
+# run is in progress, then compare logs:
+#   - Both hit "Limite de consultations" independently, offset in time -> quotas
+#     are separate; a 3rd standing job would add real throughput.
+#   - Both hit it at the same moment / one starves the other -> quota is shared;
+#     a 3rd job would not help and may waste runner minutes.
+# See CLAUDE.md "Canary test workflow" for interpretation notes.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Deliberately its own concurrency group -- must NOT queue behind
+# prospection-scraper or retry-inaccessibles, since running concurrently
+# with one of them is the entire point of the test.
+concurrency:
+  group: canary-test
+  cancel-in-progress: false
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libspatialindex-dev
+          pip install -r requirements.txt
+
+      - name: Run script
+        run: python "2.Prospection.py"
+
+      - name: Commit and push updated CSVs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
+          git commit -m "Auto-save progress (canary)" || echo "No changes to commit"
+          git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"
