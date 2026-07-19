@@ -20,6 +20,7 @@ Improvements over original:
 """
 
 import csv
+import hashlib
 import os
 import time
 import threading
@@ -58,6 +59,19 @@ POST_TYPE_PAUSE = 0.6    # seconds after last keystroke
 SUGGEST_TIMEOUT = 6      # seconds to wait for mat-option suggestion
 SEARCH_URL     = "https://espace-evaluation.sherbrooke.ca/consultation-du-role/recherche"
 
+# Address sharding -- lets multiple concurrent jobs each own a fixed, disjoint
+# slice of the address space with zero coordination/locking. Every address
+# hashes to exactly one shard via md5 (stable across processes/runs, unlike
+# Python's randomized built-in hash()), so two jobs can never pick the same
+# address regardless of scheduling or git timing. SHARD_COUNT=1 (default) is
+# a no-op -- single job behaves exactly as before.
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+SHARD_COUNT = int(os.environ.get("SHARD_COUNT", "1"))
+
+
+def shard_of(address: str) -> int:
+    return int(hashlib.md5(address.encode("utf-8")).hexdigest(), 16) % SHARD_COUNT
+
 inaccessible_path = "data/Adresses_Inaccessibles.csv"
 listed_path       = "data/Liste_Prospection.csv"
 zonage_path       = "data/Zonage.csv"
@@ -94,9 +108,12 @@ done = set(
 )
 
 todo = [a for a in joined_df["ADRESSE"].tolist() if a not in done]
+if SHARD_COUNT > 1:
+    todo = [a for a in todo if shard_of(a) == SHARD_INDEX]
 total = len(todo)
 print(f"Total addresses : {len(joined_df)}")
 print(f"Already done    : {len(done)}")
+print(f"Shard           : {SHARD_INDEX}/{SHARD_COUNT}")
 print(f"Remaining       : {total}")
 
 if not todo:
