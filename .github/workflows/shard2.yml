@@ -1,16 +1,18 @@
-name: Run Prospection Script
+name: Run Prospection Script - Shard 2
+
+# One of 4 parallel scraper shards -- see shard1.yml header and CLAUDE.md
+# "Parallel scraper shards" for the design rationale.
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # Every hour
+    - cron: '30 */1 * * *' # Every hour, offset 30m from shard 0
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Only one run at a time -- queue rather than cancel so no work is lost
 concurrency:
-  group: prospection-scraper
+  group: prospection-shard-2
   cancel-in-progress: false
 
 jobs:
@@ -20,7 +22,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          persist-credentials: true # Needed for commit + push
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -36,7 +38,7 @@ jobs:
       - name: Run script
         run: python "2.Prospection.py"
         env:
-          SHARD_INDEX: '0'
+          SHARD_INDEX: '2'
           SHARD_COUNT: '4'
 
       - name: Commit and push updated CSVs
@@ -44,5 +46,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Auto-save progress" || echo "No changes to commit"
+          git commit -m "Auto-save progress (shard 2)" || echo "No changes to commit"
           git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"

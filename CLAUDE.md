@@ -34,9 +34,11 @@ Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadi
 | `data/Zonage.csv` | Source address list (~70k total addresses) |
 | `data/Liste_Prospection.csv` | Successfully scraped addresses |
 | `data/Adresses_Inaccessibles.csv` | Addresses that hit rate limit |
-| `.github/workflows/main.yml` | Prospection workflow schedule |
-| `.github/workflows/retry.yml` | Retry workflow schedule |
-| `.github/workflows/canary-test.yml` | Manual-only (`workflow_dispatch`), no schedule — see below |
+| `.github/workflows/main.yml` | Prospection shard 0 of 4 — hourly at :00 |
+| `.github/workflows/shard1.yml` | Prospection shard 1 of 4 — hourly at :15 (was `canary-test.yml`) |
+| `.github/workflows/shard2.yml` | Prospection shard 2 of 4 — hourly at :30 |
+| `.github/workflows/shard3.yml` | Prospection shard 3 of 4 — hourly at :45 |
+| `.github/workflows/retry.yml` | Retry workflow schedule (unsharded, single job) |
 
 ---
 
@@ -83,15 +85,17 @@ Processing pace: ~352/day observed Jul 7 → Jul 14. Est. ~24k first-pass addres
 
 ---
 
-## Canary test workflow (added Jul 14 2026)
-`canary-test.yml` is a manual-only duplicate of `main.yml`, used to test whether Sherbrooke's hourly rate limit is scoped per-runner-IP (in which case a 3rd standing scraper job would add real throughput) or shared/broader across GitHub's IP pool (in which case a 3rd job wouldn't help and would waste runner minutes).
+## Parallel scraper shards (added Jul 19 2026)
 
-**How to run the test:** trigger it manually from the Actions tab while a scheduled prospection or retry run is already in progress.
-**How to read it:** compare the two runs' logs for `RATE_LIMIT` lines.
-- Independent timing (each hits its own limit on its own schedule) → quotas are separate → safe to add a 3rd standing job.
-- Simultaneous / one run starves the other → quota is shared → don't add a 3rd job.
+**Canary test result (Jul 17 2026):** ran `canary-test.yml` (manual duplicate of `main.yml`) concurrently with a live prospection run for ~4 hours. Both hit `RATE_LIMIT` independently, roughly once per hour, on their own schedule, with no mutual slowdown — confirming Sherbrooke's hourly limit is scoped **per-runner**, not shared across GitHub's IP pool. Retry's log (running the same window) also showed uninterrupted progress. Conclusion: concurrent jobs are real additional throughput, not contention.
 
-Not yet run as of Jul 14 2026 — do this before adding any permanent 3rd scraper job.
+**Bug found by the same test:** with two unsharded jobs both scanning the full remaining address list from the top, 88 addresses got scraped twice (each duplicate wastes one rate-limited request for nothing). Fixed in `2.Prospection.py` (Jul 19 2026): `SHARD_INDEX`/`SHARD_COUNT` env vars partition the address space by a stable md5 hash of each address, so concurrent jobs each own a disjoint slice with zero coordination or locking needed. `SHARD_COUNT=1` (unset) is a no-op — do not deploy a `SHARD_COUNT` change to one workflow without updating all shard workflows in the same commit, or the unassigned index range never gets processed.
+
+**Current setup:** 4 parallel prospection shards, one job each, staggered 15 min apart (`main.yml`=0 :00, `shard1.yml`=1 :15, `shard2.yml`=2 :30, `shard3.yml`=3 :45), all with `SHARD_COUNT=4`. `retry.yml` is unaffected — single job, no sharding needed since it's not in a race with itself.
+
+**Why 4 and not more:** the per-runner-quota finding was validated at N=2, not N=10. A municipal site is more likely to have a coarse abuse threshold (e.g. blocking a whole datacenter IP range) than to scale linearly forever, and if that trips, it likely breaks *all* shards at once, not just the excess ones — worse than staying at a lower N. 4 was chosen as a cautious doubling of the validated baseline.
+
+**Scale-up plan:** watch shard behavior for a few days for any sign of a shared/coarser limit — unexpected `RATE_LIMIT` clustering across shards, unusual error rates, or per-shard throughput below the ~15/hr baseline. If clean, consider stepping to 6, then re-assess before going further. Don't jump straight to a high N (e.g. 10) without incremental validation.
 
 ---
 
