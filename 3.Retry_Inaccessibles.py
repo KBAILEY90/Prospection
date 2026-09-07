@@ -89,10 +89,27 @@ def make_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1280,900")
+    # Mask automation flags -- every surface-level cause (input targeting,
+    # focus, page-load state, console errors) has been ruled out live while
+    # the autocomplete still refuses to open (aria-expanded stays false).
+    # navigator.webdriver=true is a common, simple bot-detection signal;
+    # this hides it in case the site conditionally suppresses results for
+    # automated browsers.
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
     # Capture browser-side console output (JS errors etc.) for the Sep 2026
     # site-breakage investigation -- see get_search_diagnostics.
     opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-    return webdriver.Chrome(service=Service(_DRIVER_PATH), options=opts)
+    driver = webdriver.Chrome(service=Service(_DRIVER_PATH), options=opts)
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+        )
+    except Exception:
+        pass
+    return driver
 
 
 def commit_changes() -> None:
@@ -208,6 +225,11 @@ def get_search_diagnostics(driver, inp=None) -> str:
             parts.append(f"  console: {e.get('message', '')[:200]}")
     except Exception as e:
         parts.append(f"console_log=unavailable({e})")
+    try:
+        webdriver_flag = driver.execute_script("return navigator.webdriver;")
+        parts.append(f"navigator.webdriver={webdriver_flag}")
+    except Exception as e:
+        parts.append(f"navigator.webdriver=error({e})")
     if inp is not None:
         try:
             has_focus = driver.execute_script("return document.activeElement === arguments[0];", inp)
