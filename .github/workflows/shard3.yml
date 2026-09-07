@@ -1,23 +1,24 @@
-name: Run Prospection Script - Shard 3
+name: Retry Inaccessibles - Shard 4
 
-# One of 4 parallel scraper shards -- see shard1.yml header and CLAUDE.md
-# "Parallel scraper shards" for the design rationale.
+# One of 5 parallel retry shards -- see main.yml header and CLAUDE.md
+# "Retry sharding" for the design rationale.
 
 on:
   schedule:
-    - cron: '45 */1 * * *' # Every hour, offset 45m from shard 0
+    - cron: '45 */1 * * *' # Every hour, offset 45m from shard 1
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: prospection-shard-3
+  group: retry-shard-4
   cancel-in-progress: false
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v3
         with:
@@ -35,16 +36,16 @@ jobs:
           sudo apt-get install -y libspatialindex-dev
           pip install -r requirements.txt
 
-      - name: Run script
-        run: python "2.Prospection.py"
+      - name: Run retry script
+        run: python "3.Retry_Inaccessibles.py"
         env:
-          SHARD_INDEX: '3'
-          SHARD_COUNT: '4'
+          SHARD_INDEX: '4'
+          SHARD_COUNT: '5'
 
       - name: Commit and push updated CSVs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Auto-save progress (shard 3)" || echo "No changes to commit"
+          git commit -m "Retry inaccessibles (shard 4) — auto-save" || echo "No changes to commit"
           git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"

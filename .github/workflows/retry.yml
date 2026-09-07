@@ -1,15 +1,20 @@
-name: Retry Inaccessibles
+name: Retry Inaccessibles - Shard 0
+
+# One of 5 parallel retry shards -- see main.yml header and CLAUDE.md
+# "Retry sharding" for the design rationale. This was the original
+# unsharded retry job; now shard 0 of 5, on an hourly schedule matching
+# the others (previously every 2h, back when it was the only retry job).
 
 on:
   schedule:
-    - cron: '30 */2 * * *'  # Every 2 hours, offset from main scraper
+    - cron: '0 */1 * * *'  # Every hour, aligned with shard 1 (main.yml)
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: retry-inaccessibles
+  group: retry-shard-0
   cancel-in-progress: false
 
 jobs:
@@ -38,11 +43,14 @@ jobs:
 
       - name: Run retry script
         run: python 3.Retry_Inaccessibles.py
+        env:
+          SHARD_INDEX: '0'
+          SHARD_COUNT: '5'
 
       - name: Commit and push updated CSVs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Retry inaccessibles — auto-update CSVs" || echo "No changes to commit"
-          git pull --rebase && git push || echo "Push failed — will retry next run"
+          git commit -m "Retry inaccessibles (shard 0) — auto-update CSVs" || echo "No changes to commit"
+          git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"

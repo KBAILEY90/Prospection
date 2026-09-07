@@ -1,11 +1,9 @@
 # Prospection — Claude Code Instructions
 
 ## What this project is
-Automated scraper that looks up zoning info and owner names for Quebec addresses from `data/Zonage.csv`. Two GitHub Actions workflows run continuously:
-- `2.Prospection.py` — processes new addresses every hour (:00)
-- `3.Retry_Inaccessibles.py` — retries failed addresses every 2 hours (:30)
+Automated scraper that looks up zoning info and owner names for Quebec addresses from `data/Zonage.csv`. As of Sep 6 2026, the first-pass scrape of every unique address is **complete** — all 5 GitHub Actions workflows now run `3.Retry_Inaccessibles.py` (sharded 5 ways) to drain the remaining inaccessible backlog. `2.Prospection.py` is kept in the repo, unused for now, in case `Zonage.csv` ever grows.
 
-**Goal:** ≤10% inaccessible rate in `data/Adresses_Inaccessibles.csv` with ≥1,000 combined rows.
+**Goal:** ≤10% inaccessible rate in `data/Adresses_Inaccessibles.csv` with ≥1,000 combined rows. (Achieved — rate was ~2.6% as of Sep 6 2026. Remaining work is optimization/completionist cleanup, not required to hit the target.)
 
 ---
 
@@ -21,7 +19,9 @@ Calculate:
 - **Inaccessible rows** = `Adresses_Inaccessibles.csv` line count − 1 (header)
 - **Inaccessible %** = Inaccessible ÷ (Listed + Inaccessible) × 100
 
-Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadily since Jun 19 because retry's rescue commits were being force-push-wiped; fixes deployed Jul 14, see bug list below.)
+**Caution on "remaining" math:** do NOT compute remaining as `Zonage.csv row count − (Listed + Inaccessible)`. `Zonage.csv` has 55,575 *rows* but only **53,106 unique addresses** (407 addresses appear more than once, e.g. multiple units at one civic address) — the scripts dedupe by address string, so that arithmetic overstates remaining work by ~2,469. Trust the script's own printed `Remaining` line (or `Already done` vs the 53,106 unique-address total) over a row-count subtraction.
+
+Current benchmark (Sep 6, 2026): ~2.6% — target is ≤10%, already well cleared. (Rate rose from 12.2% to 14.4% Jun 19 → Jul 14 due to the force-push bug below; fixed Jul 14, then fell steadily as first-pass scraping finished and retry kept draining the backlog.)
 
 ---
 
@@ -29,16 +29,16 @@ Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadi
 
 | File | Purpose |
 |------|---------|
-| `2.Prospection.py` | Main scraper — runs hourly via GitHub Actions |
-| `3.Retry_Inaccessibles.py` | Retries inaccessibles — runs every 2h |
-| `data/Zonage.csv` | Source address list (~70k total addresses) |
+| `2.Prospection.py` | Main scraper — **currently unused** (first pass complete), kept for if `Zonage.csv` grows |
+| `3.Retry_Inaccessibles.py` | Retries inaccessibles — now runs sharded 5 ways across all 5 workflows below |
+| `data/Zonage.csv` | Source address list — 55,575 rows, **53,106 unique addresses** (see caution above) |
 | `data/Liste_Prospection.csv` | Successfully scraped addresses |
-| `data/Adresses_Inaccessibles.csv` | Addresses that hit rate limit |
-| `.github/workflows/main.yml` | Prospection shard 0 of 4 — hourly at :00 |
-| `.github/workflows/shard1.yml` | Prospection shard 1 of 4 — hourly at :15 (was `canary-test.yml`) |
-| `.github/workflows/shard2.yml` | Prospection shard 2 of 4 — hourly at :30 |
-| `.github/workflows/shard3.yml` | Prospection shard 3 of 4 — hourly at :45 |
-| `.github/workflows/retry.yml` | Retry workflow schedule (unsharded, single job) |
+| `data/Adresses_Inaccessibles.csv` | Addresses that hit rate limit — the shrinking retry backlog |
+| `.github/workflows/retry.yml` | Retry shard 0 of 5 — hourly at :00 (was the original unsharded retry job) |
+| `.github/workflows/main.yml` | Retry shard 1 of 5 — hourly at :00 (was prospection shard 0, was `2.Prospection.py`) |
+| `.github/workflows/shard1.yml` | Retry shard 2 of 5 — hourly at :15 (was prospection shard 1, was `canary-test.yml`) |
+| `.github/workflows/shard2.yml` | Retry shard 3 of 5 — hourly at :30 (was prospection shard 2) |
+| `.github/workflows/shard3.yml` | Retry shard 4 of 5 — hourly at :45 (was prospection shard 3) |
 
 ---
 
@@ -46,6 +46,7 @@ Current benchmark (Jul 14, 2026): ~14.4% — target is ≤10%. (Rate rose steadi
 
 - **Prospection** builds a `done` set from both CSVs at startup — never re-searches an address
 - **Retry** on success: appends rescued row to `Liste_Prospection.csv` AND removes it from `Adresses_Inaccessibles.csv`
+- **Retry sharding** (Sep 6 2026): filters `Adresses_Inaccessibles.csv` down to this shard's slice (same md5-hash partition as prospection) before shuffling. `_save_progress` re-reads the live on-disk file and removes only this run's rescued addresses **by value** — it does NOT rewrite the file from the in-memory (shard-filtered) DataFrame. Do not "simplify" this back to a full-DataFrame overwrite — that would delete every other shard's rows on every save.
 - **Rate limit**: city website resets hourly ("Limite de consultations") — retry sleeps until next UTC hour + 120s
 
 ---
@@ -96,6 +97,35 @@ Processing pace: ~352/day observed Jul 7 → Jul 14. Est. ~24k first-pass addres
 **Why 4 and not more:** the per-runner-quota finding was validated at N=2, not N=10. A municipal site is more likely to have a coarse abuse threshold (e.g. blocking a whole datacenter IP range) than to scale linearly forever, and if that trips, it likely breaks *all* shards at once, not just the excess ones — worse than staying at a lower N. 4 was chosen as a cautious doubling of the validated baseline.
 
 **Scale-up plan:** watch shard behavior for a few days for any sign of a shared/coarser limit — unexpected `RATE_LIMIT` clustering across shards, unusual error rates, or per-shard throughput below the ~15/hr baseline. If clean, consider stepping to 6, then re-assess before going further. Don't jump straight to a high N (e.g. 10) without incremental validation.
+
+---
+
+## Retry sharding — first pass complete (Sep 6 2026)
+
+**What happened:** all 4 prospection shards independently logged `Remaining: 0` / "Nothing left to process" — the first-pass scrape of every unique address in `Zonage.csv` (53,106 of them) is done. This is what caused the apparent "only 10 new addresses" between two status checks that looked like a slowdown — it wasn't decay, first-pass work had simply run out. (This is also how the 55,575-vs-53,106 row/unique-address discrepancy above was discovered.)
+
+**The pivot:** rather than let the 4 idle prospection shards sit doing nothing every hour, they were repointed to run `3.Retry_Inaccessibles.py` instead, folded into a 5-way shard scheme alongside the original `retry.yml` (now shard 0). Same non-collision guarantee as prospection sharding: `SHARD_INDEX`/`SHARD_COUNT` env vars, same md5-hash partition function (duplicated into `3.Retry_Inaccessibles.py`), so no two retry shards ever attempt the same address.
+
+**A real bug caught before deploying this:** `_save_progress` originally did `inacc_df.drop(index=rescued).to_csv(...)` — a full overwrite of `Adresses_Inaccessibles.csv` from whatever `inacc_df` held in memory. That was safe when `inacc_df` was the complete backlog, but once sharded it only holds ~1/5 of the rows — the naive overwrite would have silently deleted every *other* shard's rows on every periodic save. Fixed to re-read the file fresh and remove only the rescued addresses **by value** (`isin()`), which is also robust to the file having changed on disk mid-run (e.g. a `git pull` merging in another shard's commits). See the code comment on `_save_progress` — do not revert to the DataFrame-based overwrite.
+
+Also hardened retry's own `commit_changes()` to use the same union-merge pull (`git pull --no-rebase -s recursive -X union`) that prospection's shards use, instead of plain `git pull --rebase` — with 5 concurrent jobs committing to the same two CSVs, merge conflicts are now the expected case, not the exception.
+
+**Current setup:** 5 retry shards, hourly, staggered (`retry.yml`=0 :00, `main.yml`=1 :00, `shard1.yml`=2 :15, `shard2.yml`=3 :30, `shard3.yml`=4 :45), all `SHARD_COUNT=5`.
+
+**On extending the per-runner-quota assumption to retry:** the canary test (above) validated independent hourly quotas specifically for *prospection*-type jobs. This change assumes the same holds for retry-type jobs on separate runners, since the mechanism (separate GitHub-hosted VM → separate egress IP) is identical regardless of which script runs — but this specific extension has not been separately canary-tested. Worth a similar concurrent-log comparison if retry shards ever show unexpected `RATE_LIMIT` clustering.
+
+**`2.Prospection.py` is not deleted** — if `Zonage.csv` ever gains new rows (a new source-data pull), the script and its shard-aware logic are ready to point workflows back at it.
+
+---
+
+## Progress history (continued)
+
+| Date     | Inaccessible | Total Processed | Rate  |
+|----------|-------------|-----------------|-------|
+| Jul 25   | ~1,300      | ~46,500         | 11.3% |
+| Sep 6 (pre-retry-sharding) | 1,877 → 1,416 (same day, retry draining) | ~53,340 | 3.5% → 2.6% |
+
+First-pass scraping complete as of Sep 6 2026 (53,106/53,106 unique addresses attempted). Remaining work is retry continuing to rescue addresses out of the inaccessible pile — every rescue lowers the rate further, but there's no more "total processed" growth from new addresses, only backlog movement between the two CSVs.
 
 ---
 

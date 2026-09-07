@@ -1,4 +1,14 @@
-name: Run Prospection Script
+name: Retry Inaccessibles - Shard 1
+
+# Repurposed from "Run Prospection Script" (Sep 6 2026): the first-pass
+# scrape of Zonage.csv completed -- all 4 prospection shards independently
+# reported "Remaining: 0" -- so this idle capacity now works the
+# Adresses_Inaccessibles.csv backlog instead, following the same
+# SHARD_INDEX/SHARD_COUNT partitioning pattern (now in 3.Retry_Inaccessibles.py)
+# so no two shards ever retry the same address. One of 5 total retry shards:
+# retry.yml=0, this file=1, shard1.yml=2, shard2.yml=3, shard3.yml=4, all
+# SHARD_COUNT=5. See CLAUDE.md "Retry sharding" for the full rationale.
+# 2.Prospection.py is left in place in case Zonage.csv ever grows again.
 
 on:
   schedule:
@@ -8,19 +18,19 @@ on:
 permissions:
   contents: write
 
-# Only one run at a time -- queue rather than cancel so no work is lost
 concurrency:
-  group: prospection-scraper
+  group: retry-shard-1
   cancel-in-progress: false
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          persist-credentials: true # Needed for commit + push
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -33,16 +43,16 @@ jobs:
           sudo apt-get install -y libspatialindex-dev
           pip install -r requirements.txt
 
-      - name: Run script
-        run: python "2.Prospection.py"
+      - name: Run retry script
+        run: python "3.Retry_Inaccessibles.py"
         env:
-          SHARD_INDEX: '0'
-          SHARD_COUNT: '4'
+          SHARD_INDEX: '1'
+          SHARD_COUNT: '5'
 
       - name: Commit and push updated CSVs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Auto-save progress" || echo "No changes to commit"
+          git commit -m "Retry inaccessibles (shard 1) — auto-save" || echo "No changes to commit"
           git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"

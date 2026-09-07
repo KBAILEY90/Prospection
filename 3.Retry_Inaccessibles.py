@@ -25,6 +25,7 @@ Fix
 """
 
 import csv
+import hashlib
 import os
 import time
 
@@ -57,6 +58,16 @@ RATE_LIMIT_SLEEP = 1800   # 30 min pause when hourly limit is reached
 REQUEST_DELAY    = 3      # seconds between addresses
 COMMIT_EVERY     = 300    # seconds between git auto-saves
 
+# Address sharding -- same scheme as 2.Prospection.py, so multiple concurrent
+# retry jobs can each own a disjoint slice of the inaccessible backlog with
+# zero coordination/locking. SHARD_COUNT=1 (default) is a no-op.
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+SHARD_COUNT = int(os.environ.get("SHARD_COUNT", "1"))
+
+
+def shard_of(address: str) -> int:
+    return int(hashlib.md5(address.encode("utf-8")).hexdigest(), 16) % SHARD_COUNT
+
 # ── Output columns ─────────────────────────────────────────────────────────────
 LISTED_COLS = [
     "ADRESSE", "RUE", "NB_LOGEMENTS", "DATE_CONSTRUCTION",
@@ -83,8 +94,12 @@ def commit_changes() -> None:
     os.system('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
     os.system(f'git add "{LISTED_PATH}" "{INACCESSIBLE_PATH}"')
     os.system("git commit -m 'Retry inaccessibles — auto-save' || echo 'No changes to commit'")
+    # Union merge (not plain rebase): with up to 5 concurrent retry shards
+    # committing to the same two CSVs, conflicts are frequent and expected --
+    # union resolves them by keeping both sides' lines. Never use --force*
+    # here (see CLAUDE.md bug list).
     os.system(
-        "git pull --rebase && git push "
+        "git pull --no-rebase -s recursive -X union && git push "
         "|| echo 'Push failed — will retry next commit cycle'"
     )
 
@@ -166,7 +181,7 @@ def _scrape_fields(driver, wait, row):
     ]
 
 
-def _handle_rate_limit(driver, inacc_df, rescued, label=""):
+def _handle_rate_limit(driver, rescued, label=""):
     import datetime as _dt
     now = _dt.datetime.utcnow()
     next_hour = (now + _dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
@@ -175,15 +190,28 @@ def _handle_rate_limit(driver, inacc_df, rescued, label=""):
         f"[RATE-LIMIT{label}]  Hourly limit reached after {len(rescued)} rescues. "
         f"Sleeping {sleep_time // 60}m {sleep_time % 60}s until next UTC-hour reset ..."
     )
-    _save_progress(inacc_df, rescued)
+    _save_progress(rescued)
     commit_changes()
     time.sleep(sleep_time)
     driver.get(SEARCH_URL)
 
-def _save_progress(inacc_df, rescued):
-    if rescued:
-        inacc_df.drop(index=rescued).to_csv(INACCESSIBLE_PATH, index=False, encoding="utf-8-sig")
-        print(f"  -> Removed {len(rescued)} rescued row(s) from Adresses_Inaccessibles.csv")
+def _save_progress(rescued):
+    """Remove rescued addresses (by value) from the live on-disk file.
+
+    Re-reads INACCESSIBLE_PATH fresh rather than rewriting from the in-memory
+    inacc_df: when sharded, inacc_df only holds this shard's slice, and a
+    naive overwrite would silently delete every other shard's rows. Matching
+    by address value (not the original DataFrame index) is also safe against
+    the file having changed on disk since this job started (e.g. a `git pull`
+    mid-run merging in another shard's commits).
+    """
+    if not rescued or not os.path.exists(INACCESSIBLE_PATH):
+        return
+    current = pd.read_csv(INACCESSIBLE_PATH, encoding="utf-8-sig")
+    before = len(current)
+    current = current[~current["ADRESSE"].astype(str).isin(rescued)]
+    current.to_csv(INACCESSIBLE_PATH, index=False, encoding="utf-8-sig")
+    print(f"  -> Removed {before - len(current)} rescued row(s) from Adresses_Inaccessibles.csv")
 
 
 def main():
@@ -196,6 +224,10 @@ def main():
         print("Adresses_Inaccessibles.csv is empty — nothing to retry.")
         return
 
+    full_total = len(inacc_df)
+    if SHARD_COUNT > 1:
+        inacc_df = inacc_df[inacc_df["ADRESSE"].astype(str).map(shard_of) == SHARD_INDEX]
+
     # Shuffle processing order: permanently-dead addresses accumulate at the
     # head of the file, and in file order every run would re-fail them for
     # hours before reaching rescuable rows. Index labels are preserved, so
@@ -203,7 +235,13 @@ def main():
     inacc_df = inacc_df.sample(frac=1)
 
     total = len(inacc_df)
+    print(f"Inaccessible backlog : {full_total}")
+    print(f"Shard                : {SHARD_INDEX}/{SHARD_COUNT}")
     print(f"Retrying {total} addresses ...\n")
+
+    if total == 0:
+        print("Nothing in this shard to retry. Exiting.")
+        return
 
     if not os.path.exists(LISTED_PATH):
         with open(LISTED_PATH, "w", newline="", encoding="utf-8-sig") as f:
@@ -225,12 +263,12 @@ def main():
             fields = _scrape_fields(driver, wait, row)
             with open(LISTED_PATH, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow(fields)
-            rescued.append(idx)
+            rescued.append(a)
             print(f"[OK]   {a}  ({len(rescued)}/{total})")
 
         except TimeoutException:
             if is_rate_limited(driver):
-                _handle_rate_limit(driver, inacc_df, rescued)
+                _handle_rate_limit(driver, rescued)
                 # Retry same address after waking up
                 try:
                     suggestion = search_address(driver, wait, a)
@@ -238,7 +276,7 @@ def main():
                     fields = _scrape_fields(driver, wait, row)
                     with open(LISTED_PATH, "a", newline="", encoding="utf-8-sig") as f:
                         csv.writer(f).writerow(fields)
-                    rescued.append(idx)
+                    rescued.append(a)
                     print(f"[OK-RETRY]  {a}")
                 except Exception as e2:
                     print(f"[STILL-FAIL] {a}: {e2}")
@@ -248,14 +286,14 @@ def main():
         except ElementClickInterceptedException as e:
             # Rate-limit modal can intercept clicks to the input itself
             if is_rate_limited(driver):
-                _handle_rate_limit(driver, inacc_df, rescued, " (click-intercepted)")
+                _handle_rate_limit(driver, rescued, " (click-intercepted)")
                 try:
                     suggestion = search_address(driver, wait, a)
                     suggestion.click()
                     fields = _scrape_fields(driver, wait, row)
                     with open(LISTED_PATH, "a", newline="", encoding="utf-8-sig") as f:
                         csv.writer(f).writerow(fields)
-                    rescued.append(idx)
+                    rescued.append(a)
                     print(f"[OK-RETRY]  {a}")
                 except Exception as e2:
                     print(f"[STILL-FAIL] {a}: {e2}")
@@ -279,17 +317,17 @@ def main():
             except Exception: pass
 
         if time.time() - last_commit > COMMIT_EVERY:
-            _save_progress(inacc_df, rescued)
+            _save_progress(rescued)
             commit_changes()
             last_commit = time.time()
 
     driver.quit()
-    _save_progress(inacc_df, rescued)
+    _save_progress(rescued)
 
     remaining = total - len(rescued)
     print(f"\n{'=' * 56}")
-    print(f"Rescued  : {len(rescued)}/{total}")
-    print(f"Remaining: {remaining}")
+    print(f"Rescued        : {len(rescued)}/{total} (this shard)")
+    print(f"Remaining      : {remaining} (this shard)")
     print(f"{'=' * 56}")
     commit_changes()
     print("Done.")

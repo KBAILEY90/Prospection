@@ -1,28 +1,24 @@
-name: Run Prospection Script - Shard 1
+name: Retry Inaccessibles - Shard 2
 
-# One of 4 parallel scraper shards. Each shard owns a disjoint slice of the
-# address space (via SHARD_INDEX/SHARD_COUNT in 2.Prospection.py, hashed
-# deterministically per-address) so shards never process the same address.
-# This workflow started as the manual-only canary-test.yml, which proved
-# (Jul 17 2026) that Sherbrooke's hourly rate limit is scoped per-runner,
-# not shared -- see CLAUDE.md "Parallel scraper shards" for the full
-# reasoning and the incremental scale-up plan.
+# One of 5 parallel retry shards -- see main.yml header and CLAUDE.md
+# "Retry sharding" for the design rationale.
 
 on:
   schedule:
-    - cron: '15 */1 * * *' # Every hour, offset 15m from shard 0
+    - cron: '15 */1 * * *' # Every hour, offset 15m from shard 1
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: prospection-shard-1
+  group: retry-shard-2
   cancel-in-progress: false
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v3
         with:
@@ -40,16 +36,16 @@ jobs:
           sudo apt-get install -y libspatialindex-dev
           pip install -r requirements.txt
 
-      - name: Run script
-        run: python "2.Prospection.py"
+      - name: Run retry script
+        run: python "3.Retry_Inaccessibles.py"
         env:
-          SHARD_INDEX: '1'
-          SHARD_COUNT: '4'
+          SHARD_INDEX: '2'
+          SHARD_COUNT: '5'
 
       - name: Commit and push updated CSVs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "data/Liste_Prospection.csv" "data/Adresses_Inaccessibles.csv"
-          git commit -m "Auto-save progress (shard 1)" || echo "No changes to commit"
+          git commit -m "Retry inaccessibles (shard 2) — auto-save" || echo "No changes to commit"
           git pull --no-rebase -s recursive -X union && git push || echo "Push failed — will retry next run"
