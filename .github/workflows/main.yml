@@ -44,7 +44,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run retry script
-        run: python "3.Retry_Inaccessibles.py"
+        run: python -u "3.Retry_Inaccessibles.py"
         env:
           SHARD_INDEX: '1'
           SHARD_COUNT: '5'
