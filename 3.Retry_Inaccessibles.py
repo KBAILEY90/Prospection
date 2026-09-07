@@ -89,6 +89,9 @@ def make_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1280,900")
+    # Capture browser-side console output (JS errors etc.) for the Sep 2026
+    # site-breakage investigation -- see get_search_diagnostics.
+    opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
     return webdriver.Chrome(service=Service(_DRIVER_PATH), options=opts)
 
 
@@ -143,24 +146,6 @@ def get_visible_input(driver, wait, css_selector):
     return wait.until(_pick)
 
 
-def wait_for_app_ready(driver, timeout=15) -> None:
-    """Wait for the SPA's "Veuillez patienter..." loading state to clear.
-
-    Observed live (Sep 2026): the address input becomes visible/clickable
-    before the site's underlying address data has finished loading, so
-    typing too early produces a permanently-empty, never-opened
-    autocomplete panel (aria-expanded stays false) even though the input
-    itself accepts text fine. This is a distinct failure point from the
-    duplicate-input issue fixed alongside get_visible_input().
-    """
-    try:
-        WebDriverWait(driver, timeout).until_not(
-            lambda d: "Veuillez patienter" in d.page_source
-        )
-    except TimeoutException:
-        pass  # proceed anyway; downstream diagnostics will show if it mattered
-
-
 def get_search_diagnostics(driver, inp=None) -> str:
     """Rich diagnostic snapshot logged on a total search_address() failure.
     Temporary-ish debug aid for the Sep 2026 site-breakage investigation --
@@ -199,9 +184,30 @@ def get_search_diagnostics(driver, inp=None) -> str:
     except Exception:
         pass
     try:
-        parts.append(f"still_loading={'Veuillez patienter' in driver.page_source}")
+        # Check the loader's actual CSS visibility, not text presence --
+        # its "Veuillez patienter..." text stays in the DOM forever even
+        # after the loader is hidden, so a text-presence check is always
+        # true and meaningless (confirmed live Sep 2026).
+        still_loading = driver.execute_script(
+            """
+            var el = document.querySelector('div.loader');
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            var cs = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden';
+            """
+        )
+        parts.append(f"still_loading={still_loading}")
     except Exception:
         pass
+    try:
+        logs = driver.get_log("browser")
+        errors = [e for e in logs if e.get("level") == "SEVERE"]
+        parts.append(f"console_errors={len(errors)}")
+        for e in errors[:3]:
+            parts.append(f"  console: {e.get('message', '')[:200]}")
+    except Exception as e:
+        parts.append(f"console_log=unavailable({e})")
     if inp is not None:
         try:
             has_focus = driver.execute_script("return document.activeElement === arguments[0];", inp)
@@ -225,7 +231,6 @@ def get_search_diagnostics(driver, inp=None) -> str:
 def search_address(driver, wait, address):
     """Type address char-by-char then wait for mat-autocomplete suggestion."""
     dismiss_cookie_consent(driver)
-    wait_for_app_ready(driver)
     try:
         inp = get_visible_input(driver, wait, 'input[placeholder="Adresse..."]')
     except TimeoutException:
