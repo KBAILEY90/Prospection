@@ -143,6 +143,24 @@ def get_visible_input(driver, wait, css_selector):
     return wait.until(_pick)
 
 
+def wait_for_app_ready(driver, timeout=15) -> None:
+    """Wait for the SPA's "Veuillez patienter..." loading state to clear.
+
+    Observed live (Sep 2026): the address input becomes visible/clickable
+    before the site's underlying address data has finished loading, so
+    typing too early produces a permanently-empty, never-opened
+    autocomplete panel (aria-expanded stays false) even though the input
+    itself accepts text fine. This is a distinct failure point from the
+    duplicate-input issue fixed alongside get_visible_input().
+    """
+    try:
+        WebDriverWait(driver, timeout).until_not(
+            lambda d: "Veuillez patienter" in d.page_source
+        )
+    except TimeoutException:
+        pass  # proceed anyway; downstream diagnostics will show if it mattered
+
+
 def get_search_diagnostics(driver, inp=None) -> str:
     """Rich diagnostic snapshot logged on a total search_address() failure.
     Temporary-ish debug aid for the Sep 2026 site-breakage investigation --
@@ -180,6 +198,10 @@ def get_search_diagnostics(driver, inp=None) -> str:
         parts.append(f"panel_exists={len(panels) > 0} panel_count={len(panels)}")
     except Exception:
         pass
+    try:
+        parts.append(f"still_loading={'Veuillez patienter' in driver.page_source}")
+    except Exception:
+        pass
     if inp is not None:
         try:
             has_focus = driver.execute_script("return document.activeElement === arguments[0];", inp)
@@ -203,6 +225,7 @@ def get_search_diagnostics(driver, inp=None) -> str:
 def search_address(driver, wait, address):
     """Type address char-by-char then wait for mat-autocomplete suggestion."""
     dismiss_cookie_consent(driver)
+    wait_for_app_ready(driver)
     try:
         inp = get_visible_input(driver, wait, 'input[placeholder="Adresse..."]')
     except TimeoutException:
