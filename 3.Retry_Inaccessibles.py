@@ -81,7 +81,10 @@ _DRIVER_PATH = ChromeDriverManager().install()
 
 def make_driver() -> webdriver.Chrome:
     opts = Options()
-    opts.add_argument("--headless")
+    # "new" headless mode, not the deprecated classic --headless -- classic
+    # headless has known event/rendering quirks vs a real browser that may
+    # be contributing to the Sep 2026 autocomplete-trigger breakage.
+    opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
