@@ -140,10 +140,55 @@ def get_visible_input(driver, wait, css_selector):
     return wait.until(_pick)
 
 
+def get_search_diagnostics(driver, inp=None) -> str:
+    """Rich diagnostic snapshot logged on a total search_address() failure.
+    Temporary-ish debug aid for the Sep 2026 site-breakage investigation --
+    safe to trim once the fix is confirmed stable across multiple runs."""
+    parts = []
+    try:
+        parts.append(f"url={driver.current_url}")
+    except Exception:
+        parts.append("url=N/A")
+    try:
+        all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
+        parts.append(f"input_matches={len(all_inputs)}")
+        for i, el in enumerate(all_inputs):
+            try:
+                parts.append(
+                    f"  input[{i}] displayed={el.is_displayed()} enabled={el.is_enabled()} "
+                    f"value='{el.get_attribute('value')}'"
+                )
+            except Exception as e:
+                parts.append(f"  input[{i}] error={e}")
+    except Exception as e:
+        parts.append(f"input_matches=error({e})")
+    if inp is not None:
+        try:
+            parts.append(f"picked_input value='{inp.get_attribute('value')}' displayed={inp.is_displayed()}")
+        except Exception as e:
+            parts.append(f"picked_input=error({e})")
+    try:
+        opts = driver.find_elements(By.CSS_SELECTOR, "mat-option")
+        parts.append(f"mat_option_count={len(opts)}")
+    except Exception:
+        pass
+    try:
+        dialogs = driver.find_elements(By.XPATH, '//button[contains(., "Tout accepter")]')
+        visible_dialogs = [d for d in dialogs if d.is_displayed()]
+        parts.append(f"cookie_dialog_still_present={len(visible_dialogs) > 0}")
+    except Exception:
+        pass
+    return "  |  ".join(parts)
+
+
 def search_address(driver, wait, address):
     """Type address char-by-char then wait for mat-autocomplete suggestion."""
     dismiss_cookie_consent(driver)
-    inp = get_visible_input(driver, wait, 'input[placeholder="Adresse..."]')
+    try:
+        inp = get_visible_input(driver, wait, 'input[placeholder="Adresse..."]')
+    except TimeoutException:
+        print(f"  [DIAG] {address}  (no visible input found)  {get_search_diagnostics(driver)}")
+        raise
     inp.click()
     inp.clear()
 
@@ -187,9 +232,13 @@ def search_address(driver, wait, address):
         inp, address,
     )
     time.sleep(POST_TYPE_PAUSE)
-    return WebDriverWait(driver, SUGGEST_TIMEOUT).until(
-        EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-option.mat-mdc-option"))
-    )
+    try:
+        return WebDriverWait(driver, SUGGEST_TIMEOUT).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-option.mat-mdc-option"))
+        )
+    except TimeoutException:
+        print(f"  [DIAG] {address}  {get_search_diagnostics(driver, inp)}")
+        raise
 
 
 def get_cell(driver, wait, xpath):
