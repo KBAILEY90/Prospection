@@ -176,6 +176,22 @@ def get_search_diagnostics(driver, inp=None) -> str:
     except Exception:
         pass
     try:
+        panels = driver.find_elements(By.CSS_SELECTOR, ".mat-mdc-autocomplete-panel, .cdk-overlay-pane")
+        parts.append(f"panel_exists={len(panels) > 0} panel_count={len(panels)}")
+    except Exception:
+        pass
+    if inp is not None:
+        try:
+            has_focus = driver.execute_script("return document.activeElement === arguments[0];", inp)
+            parts.append(f"input_has_focus={has_focus}")
+        except Exception as e:
+            parts.append(f"input_has_focus=error({e})")
+        try:
+            aria_expanded = inp.get_attribute("aria-expanded")
+            parts.append(f"aria_expanded={aria_expanded}")
+        except Exception:
+            pass
+    try:
         dialogs = driver.find_elements(By.XPATH, '//button[contains(., "Tout accepter")]')
         visible_dialogs = [d for d in dialogs if d.is_displayed()]
         parts.append(f"cookie_dialog_still_present={len(visible_dialogs) > 0}")
