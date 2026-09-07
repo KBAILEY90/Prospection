@@ -253,6 +253,42 @@ def dismiss_overlay(driver) -> bool:
     return False
 
 
+def dismiss_cookie_consent(driver) -> bool:
+    """Dismiss Sherbrooke's cookie-consent dialog ("Nous utilisons des
+    témoins!") if present. Added Sep 2026 when the site introduced this
+    dialog; harmless no-op if it isn't shown (may not appear every load)."""
+    try:
+        for btn in driver.find_elements(By.XPATH, '//button[contains(., "Tout accepter")]'):
+            if btn.is_displayed():
+                btn.click()
+                time.sleep(0.3)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def get_visible_input(driver, wait, css_selector):
+    """Return the first VISIBLE + enabled element matching css_selector.
+
+    Sherbrooke's site (as of Sep 2026) renders the address search input
+    TWICE -- one live, one a zero-size duplicate left over from an inactive
+    tab panel -- both sharing the same placeholder/selector. A plain
+    find_element/EC.element_to_be_clickable grabs whichever is first in DOM
+    order, which is NOT guaranteed to be the live one. This polls for
+    visibility explicitly instead of trusting DOM order.
+    """
+    def _pick(d):
+        for el in d.find_elements(By.CSS_SELECTOR, css_selector):
+            try:
+                if el.is_displayed() and el.is_enabled():
+                    return el
+            except Exception:
+                continue
+        return False
+    return wait.until(_pick)
+
+
 def safe_write_listed(fields: list) -> None:
     with write_lock:
         with open(listed_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -301,16 +337,18 @@ def worker(worker_id: int) -> None:
             try:
                 # -- Navigate to search page for clean Angular state ----------
                 driver.get(SEARCH_URL)
+                dismiss_cookie_consent(driver)
 
                 # -- Search ---------------------------------------------------
-                inp = wait.until(EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, 'input[placeholder="Adresse..."]')
-                ))
+                inp = get_visible_input(driver, wait, 'input[placeholder="Adresse..."]')
                 inp.click()
                 inp.clear()
 
                 # Strategy 1: slow char-by-char typing so Angular's debounced
-                # autocomplete actually fires (root cause of most inaccessibles)
+                # autocomplete actually fires (root cause of most inaccessibles).
+                # send_keys() fires real keydown/keypress/input/keyup per
+                # character, which the site's autocomplete requires (see
+                # Strategy 2 below for why a bare 'input' event is not enough).
                 for ch in a:
                     inp.send_keys(ch)
                     time.sleep(CHAR_DELAY)
@@ -323,13 +361,26 @@ def worker(worker_id: int) -> None:
                         )
                     )
                 except TimeoutException:
-                    # Strategy 2: native JS InputEvent fallback
+                    # Strategy 2: native JS keydown+input+keyup fallback, per
+                    # character. A single bulk value-set + 'input' event (the
+                    # old fallback) stopped triggering the autocomplete
+                    # entirely as of Sep 2026 -- confirmed via live testing
+                    # that the panel only opens with a full keydown/input/keyup
+                    # sequence per character, matching what send_keys() does.
                     driver.execute_script(
                         """
+                        var el = arguments[0], text = arguments[1];
                         var setter = Object.getOwnPropertyDescriptor(
                             window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(arguments[0], arguments[1]);
-                        arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                        setter.call(el, '');
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        for (var i = 0; i < text.length; i++) {
+                            var ch = text[i];
+                            setter.call(el, el.value + ch);
+                            el.dispatchEvent(new KeyboardEvent('keydown', {key: ch, bubbles: true}));
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new KeyboardEvent('keyup', {key: ch, bubbles: true}));
+                        }
                         """,
                         inp, a,
                     )
