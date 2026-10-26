@@ -1,7 +1,16 @@
 # Prospection — Claude Code Instructions
 
+## STATUS: project complete — all scraper workflows DISABLED (Oct 26 2026)
+
+The lists are done, so the five scraper workflows (`retry.yml`, `main.yml`, `shard1.yml`, `shard2.yml`, `shard3.yml`) were **disabled manually on Oct 26 2026** (`gh workflow disable`). Nothing runs on a schedule any more except GitHub's own "Dependency Graph" job (runs only when dependency files change; free). The code, workflow files, and data are all kept intact.
+
+- **To turn it back on:** `gh workflow enable <file>` for each of the five files (e.g. `gh workflow enable retry.yml --repo KBAILEY90/Prospection`). Each shard has its own `SHARD_INDEX`/`SHARD_COUNT=5` in its YAML, so re-enable **all five** or the missing shards' slices are never retried.
+- **Why stopped:** first pass finished Sep 6 2026 (53,106/53,106 unique addresses). Retry had been reporting `Rescued: 0` for weeks — see "Why the retry backlog doesn't drain" below. More runs could not change the lists, but they were burning ~38 runner-hours/day and committing a 22 MB CSV constantly (the repo reached ~443 MB).
+- **Final state of the data (Oct 15 2026):** 51,998 rows listed, ~1,353 still in `Adresses_Inaccessibles.csv`. Roughly 88% of those have no match on the site at all (nothing to rescue). Roughly 10–12% (~170) are multi-unit addresses that need the unbuilt "pick a matricule" step; deliberately left unresolved.
+- **Cost:** none. The repo is public, so Actions minutes are free (Oct 2026 used 56,738 min; list value ≈ $340). **If this repo is ever made private those minutes would be billed/exhausted almost immediately** — disable the workflows first.
+
 ## What this project is
-Automated scraper that looks up zoning info and owner names for Quebec addresses from `data/Zonage.csv`. As of Sep 6 2026, the first-pass scrape of every unique address is **complete** — all 5 GitHub Actions workflows now run `3.Retry_Inaccessibles.py` (sharded 5 ways) to drain the remaining inaccessible backlog. `2.Prospection.py` is kept in the repo, unused for now, in case `Zonage.csv` ever grows.
+Automated scraper that looks up zoning info and owner names for Quebec addresses from `data/Zonage.csv`. As of Sep 6 2026, the first-pass scrape of every unique address is **complete** — until Oct 26 2026 all 5 GitHub Actions workflows ran `3.Retry_Inaccessibles.py` (sharded 5 ways) to drain the remaining inaccessible backlog (now disabled, see STATUS above). `2.Prospection.py` is kept in the repo, unused for now, in case `Zonage.csv` ever grows.
 
 **Goal:** ≤10% inaccessible rate in `data/Adresses_Inaccessibles.csv` with ≥1,000 combined rows. (Achieved — rate was ~2.6% as of Sep 6 2026. Remaining work is optimization/completionist cleanup, not required to hit the target.)
 
@@ -26,6 +35,8 @@ Current benchmark (Sep 6, 2026): ~2.6% — target is ≤10%, already well cleare
 ---
 
 ## Key files
+
+*(All five workflow files below are **disabled** as of Oct 26 2026 — see STATUS at the top. The schedules listed are what they ran at before being disabled.)*
 
 | File | Purpose |
 |------|---------|
@@ -59,9 +70,21 @@ Current benchmark (Sep 6, 2026): ~2.6% — target is ≤10%, already well cleare
 2. **Retry commit_changes**: replaced fragile multi-line push block with rebase-abort-on-failure pattern
 3. **Autocomplete debounce bug** (fixed Jul 8 2026): `2.Prospection.py` used one-shot `send_keys(a)`; Angular's debounced mat-autocomplete never fired → TimeoutException → address wrongly marked inaccessible. This was the ~12–15% inflow floor. Backported the retry script's fix (char-by-char typing + JS `input`-event fallback). Also raised `MAX_RETRIES` 0→1.
 4. **Retry head-of-file grind** (fixed Jul 14 2026): `3.Retry_Inaccessibles.py` processed rows in file order; permanently-dead addresses accumulate at the head, so every run burned hours re-failing them before reaching rescuable rows. Now shuffles the order each run (`inacc_df.sample(frac=1)`).
-5. **Site changed underneath the scripts — 100% retry failure for 3+ days** (fixed Sep 7 2026): Sherbrooke's site added (a) a cookie-consent dialog ("Nous utilisons des témoins!") and (b) a duplicate, zero-size address `<input>` left in the DOM from a tab-panel redesign — both share `placeholder="Adresse..."`, so `find_element`/`EC.element_to_be_clickable` could grab the wrong (invisible) one. Confirmed via live browser testing that a bare JS `value` + `input` event (the old Strategy 2 fallback) **no longer triggers the autocomplete at all** — the site now requires a full `keydown`→`input`→`keyup` sequence per character. Fixed in both scripts: `dismiss_cookie_consent()` runs before every search; `get_visible_input()` polls for the specific visible+enabled element instead of trusting DOM order; the JS fallback now dispatches the full per-character key-event sequence. Root-caused by manually driving the live site (not just reading logs) — the backlog had been frozen at exactly 1,416 across Sep 4/5/6 runs, predating the retry-sharding work below, so don't confuse this with a sharding bug.
+5. **RETRACTED — "site changed underneath the scripts" was a wrong root cause** (investigated Sep 7 → Oct 15 2026; see "Why the retry backlog doesn't drain" below). The retry search **works** — confirmed locally with the production code and from CI's own logs. Things this investigation tried that were **not** the cause and need not be revisited: the cookie-consent dialog (CookieConsent v3, `#cc-main`; it appears on CI runners but not on a fresh local profile, and no evidence it affects results), the duplicate hidden `Adresse...` input (`get_visible_input()` is harmless and can stay), `navigator.webdriver` masking, `--headless=new`, an app "loading" state (the `div.loader` text stays in the DOM forever, so a text check is always true), and the claim that the autocomplete needs a full keydown/input/keyup sequence (a flawed manual test; plain Selenium `send_keys` works). Several of these were deployed as speculative changes (webdriver masking flags + CDP script, `--headless=new`, `[DIAG]` logging with `get_log`) — they are unnecessary and may be removed.
 
 Note: fixes #1v2 and #3 were first pushed Jul 8 but were themselves erased by an in-flight workflow run still executing the old force-push code. Re-deployed Jul 14. If a `(forced update)` ever appears on origin/main again, check that these fixes are still present.
+
+---
+
+## Why the retry backlog doesn't drain (root cause found Oct 15 2026)
+
+The backlog (`Adresses_Inaccessibles.csv`, ~1,353 rows) is mostly **not rescuable by this approach**, and retry runs report `Rescued: 0` because of what the backlog now contains — not because anything is broken:
+
+1. **~88% have no match at all.** The site's autocomplete calls a vendor API: `https://vplus.modellium.com/api/espace-evaluation.sherbrooke.ca/role/cpr/autocompleteaddress?input=<address>` (needs no auth; sends `RateLimit-Limit: 300` per 60s). It returns `[]` for these — the address string isn't in the role under that spelling. Nothing to rescue. (40-address sample: 35 empty.)
+2. **~10–12% are multi-matricule addresses** (condo/multi-unit style: 2–8 matricules each). The API returns matches; after the suggestion is clicked the UI shows a **"Matricule" dropdown** and does not load the detail page until one is chosen. `_scrape_fields` waits `FIELD_TIMEOUT` (30s) for the `Nom:` cell, times out, and `main()`'s generic `except TimeoutException` prints **`[FAIL] … no autocomplete suggestion` — a misleading label**: the suggestion *did* appear. In a CI log, a `[FAIL]` with **no preceding `[DIAG]`** is this case (25 of 263 in the Oct 15 shard-4 run).
+3. The detail page is directly addressable: `https://espace-evaluation.sherbrooke.ca/consultation-du-role/role?matricule=<MATRICULE>` (this is the `URL` column format), and the API supplies the matricules. Direct loads scrape fine with the existing selectors (the owner text fills in a moment after the `Nom:` cell appears — wait for non-empty text). Unit-level pages can be sub-lots (e.g. a unit whose usage is vacant land), so "which matricule represents the address" is an open **data-model decision** (first matricule? one row per unit?) — not yet made.
+
+**How this was found (reuse it):** don't iterate via CI cancel-after-N-minutes cycles — they cost hours and Python's stdout buffering hid output. Instead (a) `curl` the autocomplete API for sample backlog addresses to see which even have matches; (b) install `selenium` in a throwaway venv and run the real `make_driver`/`search_address`/`_scrape_fields` locally on known-hit addresses (the cookie dialog doesn't even show locally; pandas can be stubbed if the machine's app-control blocks its DLL); (c) split CI `[FAIL]` lines by presence of the preceding `[DIAG]` line. The earlier "site broke" theory came from testing only addresses that legitimately have no match and never running a known-good control.
 
 ---
 
@@ -127,6 +150,15 @@ Also hardened retry's own `commit_changes()` to use the same union-merge pull (`
 | Sep 6 (pre-retry-sharding) | 1,877 → 1,416 (same day, retry draining) | ~53,340 | 3.5% → 2.6% |
 
 First-pass scraping complete as of Sep 6 2026 (53,106/53,106 unique addresses attempted). Remaining work is retry continuing to rescue addresses out of the inaccessible pile — every rescue lowers the rate further, but there's no more "total processed" growth from new addresses, only backlog movement between the two CSVs.
+
+---
+
+## "90% of GitHub Actions storage" email (Oct 26 2026) — investigated
+
+**Not caused by this repo.** All Actions-storage usage on the account (every month since Jun 2026) was attributed to a **different repo, PhonoLeaf** (archived, private; website since migrated to Everbloom-Technologies / Cloudflare Pages). This repo (public) has no storage usage, 0 artifacts and 0 caches, and its minutes are free.
+
+- PhonoLeaf held a **constant ~565 MB (13.25 GB-hours/day) every day from Sep 11 onward** — right after its last Pages deploys on Sep 10 — that never expired, and the meter was still accruing on Oct 26. It was invisible to the API: 0 artifacts, 0 caches, 0 releases, no Git LFS; its only workflow (`deploy.yml`) uploads a Pages artifact that normally expires after 1 day. Best guess (unproven): leftover storage GitHub wasn't expiring, possibly because the repo is archived. Free-allowance math: 500 MB × 744 h ≈ 372 GB-hours/month, so a flat 565 MB crosses 90% around the 26th every month. Net cost was $0.00 even in months over the allowance (Aug 2026: 890 GB-hours).
+- **How to read billing from the CLI** (the old `/settings/billing/actions` endpoints now return 410): `gh auth refresh -h github.com -s user`, then `gh api "users/<user>/settings/billing/usage?year=2026&month=10&day=<d>"` (per-day) or `.../usage/summary`. Rows are per `sku` + `repositoryName`; "Actions storage" is in GigabyteHours, "Actions Linux" in Minutes.
 
 ---
 
